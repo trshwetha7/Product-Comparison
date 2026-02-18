@@ -14,6 +14,14 @@ const CATEGORY_TAG_HINTS = {
   "eye-makeup": ["eye-makeup", "eyeliner", "mascara", "eyeshadow", "kajal", "brow"]
 };
 
+const ALT_SEARCH_TERMS = {
+  all: "beauty makeup skincare fragrance",
+  fragrances: "perfume fragrance eau de parfum body mist deodorant",
+  "lip-care": "lip balm lipstick lip gloss lip tint",
+  "skin-care": "skin care cleanser moisturizer serum body wash",
+  "eye-makeup": "eyeliner mascara kajal eyeshadow brow pencil"
+};
+
 const RISK_INGREDIENTS = [
   { key: "paraben", penalty: 13, note: "Parabens can act as endocrine disruptor candidates." },
   { key: "phthalate", penalty: 15, note: "Phthalates are often flagged for hormone-disruption concerns." },
@@ -65,17 +73,23 @@ const FUN_FACTS = {
   quick: [
     "Refillable beauty packaging can reduce packaging waste by up to 70% across repeated purchases.",
     "Using one multi-purpose product can reduce both waste and overconsumption.",
-    "Picking concentrated formulas often cuts water-heavy packaging and transport weight."
+    "Picking concentrated formulas often cuts water-heavy packaging and transport weight.",
+    "Choosing larger refill packs usually lowers plastic use per milliliter.",
+    "Ingredient transparency helps shoppers avoid repeated trial-and-error purchases."
   ],
   eco: [
     "Choosing refill packs and recycled-material bottles lowers lifecycle plastic demand.",
     "Microplastic-linked polymers can persist for years, so polymer-free formulas matter.",
-    "Cruelty-free + transparent sourcing labels make eco-comparisons easier."
+    "Cruelty-free + transparent sourcing labels make eco-comparisons easier.",
+    "Recyclable mono-material packaging is easier to process than mixed plastics.",
+    "Buying only what you can finish is one of the most sustainable beauty habits."
   ],
   body: [
     "Fragrance-free options can be gentler for reactive or sensitized skin barriers.",
     "Shorter ingredient lists can make sensitivity tracking and patch-testing easier.",
-    "Barrier-supporting ingredients like ceramides and glycerin can improve tolerance."
+    "Barrier-supporting ingredients like ceramides and glycerin can improve tolerance.",
+    "Patch-testing new products can prevent unnecessary irritation and waste.",
+    "Lower-irritant formulas can support long-term skin comfort for sensitive users."
   ]
 };
 
@@ -84,7 +98,10 @@ const state = {
   suggestionItems: [],
   lastAnalyses: [],
   selectedId: null,
-  factType: "quick"
+  factType: "quick",
+  lastFactText: "",
+  alternativeRequestId: 0,
+  alternativeCache: {}
 };
 
 const refs = {
@@ -117,6 +134,13 @@ function clamp(value, min, max) {
 
 function randomItem(items) {
   return items[Math.floor(Math.random() * items.length)];
+}
+
+function randomItemExcluding(items, previous) {
+  if (!items.length) return "";
+  if (items.length === 1) return items[0];
+  const filtered = items.filter((item) => item !== previous);
+  return filtered.length ? randomItem(filtered) : randomItem(items);
 }
 
 function setStatus(text) {
@@ -171,8 +195,34 @@ function categoryLabel(product) {
   return "Beauty";
 }
 
+function primaryCategoryKey(product) {
+  const order = ["fragrances", "lip-care", "skin-care", "eye-makeup"];
+  for (const key of order) {
+    if (categoryMatch(product, key)) return key;
+  }
+  return "all";
+}
+
 function matchesActiveCategory(product) {
   return categoryMatch(product, state.activeCategory);
+}
+
+function analysisKey(analysis) {
+  const fallback = `${analysis.product.name.toLowerCase()}::${analysis.product.brand.toLowerCase()}`;
+  return analysis.product.id ? `${analysis.product.id}::${fallback}` : fallback;
+}
+
+function uniqueAnalyses(analyses) {
+  const unique = [];
+  const keySet = new Set();
+  for (const analysis of analyses) {
+    const key = analysisKey(analysis);
+    if (!keySet.has(key)) {
+      keySet.add(key);
+      unique.push(analysis);
+    }
+  }
+  return unique;
 }
 
 function normalizeProduct(rawProduct) {
@@ -384,29 +434,98 @@ function renderInsightLists(analysis) {
   }
 }
 
-function renderAlternatives(selectedAnalysis, allAnalyses) {
-  const alternatives = allAnalyses
-    .filter((entry) => entry.product.id !== selectedAnalysis.product.id)
-    .filter((entry) => entry.overallScore >= selectedAnalysis.overallScore + 4)
-    .sort((a, b) => b.overallScore - a.overallScore)
-    .slice(0, 3);
+function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
+  const selectedBrand = selectedAnalysis.product.brand.toLowerCase();
+  const selectedKey = analysisKey(selectedAnalysis);
 
+  const ranked = analyses
+    .filter((analysis) => analysisKey(analysis) !== selectedKey)
+    .filter((analysis) => categoryKey === "all" || categoryMatch(analysis.product, categoryKey))
+    .map((analysis) => {
+      const delta = analysis.overallScore - selectedAnalysis.overallScore;
+      const differentBrand = analysis.product.brand.toLowerCase() !== selectedBrand;
+      const rankValue =
+        analysis.overallScore +
+        (differentBrand ? 4 : 0) +
+        (delta > 0 ? delta * 0.45 : delta * 0.12) +
+        analysis.confidence * 0.03;
+
+      return {
+        analysis,
+        delta,
+        differentBrand,
+        rankValue
+      };
+    })
+    .sort((a, b) => b.rankValue - a.rankValue);
+
+  const cleaner = ranked.filter((entry) => entry.delta >= 1).slice(0, 3);
+  if (cleaner.length >= 3) return cleaner;
+
+  const picked = [...cleaner];
+  for (const entry of ranked) {
+    if (picked.some((p) => analysisKey(p.analysis) === analysisKey(entry.analysis))) continue;
+    picked.push(entry);
+    if (picked.length === 3) break;
+  }
+  return picked;
+}
+
+async function fetchBroaderAlternatives(selectedAnalysis, categoryKey) {
+  const cacheKey = categoryKey;
+  if (state.alternativeCache[cacheKey]) {
+    return state.alternativeCache[cacheKey];
+  }
+
+  const selectedNameHint = selectedAnalysis.product.name.split(" ").slice(0, 2).join(" ");
+  const query = ALT_SEARCH_TERMS[categoryKey] || `${selectedNameHint} beauty`;
+  const rows = await fetchProducts(query, 50, 2);
+  const analyses = rows
+    .map(normalizeProduct)
+    .filter(Boolean)
+    .filter((product) => categoryKey === "all" || categoryMatch(product, categoryKey))
+    .map(analyzeProduct);
+
+  const deduped = uniqueAnalyses(analyses);
+  state.alternativeCache[cacheKey] = deduped;
+  return deduped;
+}
+
+async function renderAlternatives(selectedAnalysis, allAnalyses) {
+  const requestId = ++state.alternativeRequestId;
+  refs.alternativesGrid.innerHTML = `<p class="empty-state">Scanning for cleaner alternatives...</p>`;
+
+  const categoryKey = primaryCategoryKey(selectedAnalysis.product);
+  let ranked = rankAlternativeCandidates(selectedAnalysis, uniqueAnalyses(allAnalyses), categoryKey);
+
+  if (ranked.length < 3) {
+    try {
+      const broader = await fetchBroaderAlternatives(selectedAnalysis, categoryKey);
+      if (requestId !== state.alternativeRequestId) return;
+      ranked = rankAlternativeCandidates(selectedAnalysis, uniqueAnalyses([...allAnalyses, ...broader]), categoryKey);
+    } catch (error) {
+      if (requestId !== state.alternativeRequestId) return;
+    }
+  }
+
+  const alternatives = ranked.slice(0, 3);
   if (!alternatives.length) {
-    refs.alternativesGrid.innerHTML = `<p class="empty-state">No stronger alternatives found in this result set yet. Try a broader search term.</p>`;
+    refs.alternativesGrid.innerHTML = `<p class="empty-state">No alternatives were found yet. Try a broader product or category search.</p>`;
     return;
   }
 
   refs.alternativesGrid.innerHTML = alternatives
-    .map(
-      (alt) => `
+    .map(({ analysis, delta, differentBrand }) => {
+      const badge = delta >= 1 ? `Cleaner +${delta}` : differentBrand ? "Similar Option" : "Alternative";
+      return `
       <article class="alt-card">
-        <h3>${escapeHtml(alt.product.name)}</h3>
-        <p>${escapeHtml(alt.product.brand)}</p>
-        <span class="alt-badge">Score ${alt.overallScore}</span>
-        <p>${escapeHtml(buildOverview(alt))}</p>
+        <h3>${escapeHtml(analysis.product.name)}</h3>
+        <p>${escapeHtml(analysis.product.brand)}</p>
+        <span class="alt-badge">${badge} · Score ${analysis.overallScore}</span>
+        <p>${escapeHtml(buildOverview(analysis))}</p>
       </article>
-    `
-    )
+    `;
+    })
     .join("");
 }
 
@@ -471,7 +590,9 @@ function factPool(type) {
 
 function renderFunFact(type = state.factType) {
   const pool = factPool(type);
-  refs.funFact.textContent = randomItem(pool);
+  const selectedFact = randomItemExcluding(pool, state.lastFactText);
+  state.lastFactText = selectedFact;
+  refs.funFact.textContent = selectedFact;
 }
 
 async function fetchProducts(query, pageSize = 30, pages = 1) {
@@ -577,7 +698,7 @@ async function analyzeQuery(query, preferredProductName = "") {
       return;
     }
 
-    const analyses = products.map(analyzeProduct);
+    const analyses = uniqueAnalyses(products.map(analyzeProduct));
 
     analyses.sort((a, b) => {
       const preferredBoostA = preferredProductName &&
@@ -596,6 +717,7 @@ async function analyzeQuery(query, preferredProductName = "") {
     state.lastAnalyses = analyses;
     const selected = analyses[0];
     renderSelectedAnalysis(selected, analyses);
+    renderFunFact(state.factType);
     setStatus(`Analyzed ${products.length} products from Open Beauty Facts.`);
   } catch (error) {
     setStatus("Could not load product data right now. Please retry in a moment.");
@@ -670,10 +792,15 @@ function setupEvents() {
     if (!button) return;
 
     const type = button.dataset.factType;
+    if (type === "refresh") {
+      renderFunFact(state.factType);
+      return;
+    }
     state.factType = type;
 
-    const allButtons = Array.from(refs.factButtons.querySelectorAll(".fact-btn"));
+    const allButtons = Array.from(refs.factButtons.querySelectorAll(".fact-btn[data-fact-type]"));
     for (const factButton of allButtons) {
+      if (factButton.dataset.factType === "refresh") continue;
       factButton.classList.toggle("active", factButton.dataset.factType === type);
     }
     renderFunFact(type);
@@ -693,6 +820,9 @@ function setupEvents() {
 function init() {
   renderFunFact("quick");
   setupEvents();
+  window.setInterval(() => {
+    renderFunFact(state.factType);
+  }, 12000);
 }
 
 init();
