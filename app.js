@@ -1,21 +1,18 @@
 const API_BASE = "https://world.openbeautyfacts.org/cgi/search.pl";
 const CATEGORY_KEYWORDS = {
   all: [],
-  fragrances: ["perfume", "fragrance", "deodorant", "cologne", "eau de", "body mist"],
-  "lip-care": ["lip", "lipstick", "lip balm", "lip gloss", "lip care"],
-  "skin-care": ["cream", "cleanser", "serum", "moisturizer", "lotion", "body wash", "face wash", "mask"],
-  "eye-makeup": ["eyeliner", "mascara", "eyeshadow", "eye shadow", "brow", "kajal"]
+  fragrances: ["perfume", "fragrance", "deodorant", "cologne", "eau de", "body mist", "parfum"],
+  "lip-care": ["lip", "lipstick", "lip balm", "lip gloss", "lip care", "lipliner", "lipstick"],
+  "skin-care": ["cream", "cleanser", "serum", "moisturizer", "lotion", "body wash", "face wash", "mask", "toner"],
+  "eye-makeup": ["eyeliner", "mascara", "eyeshadow", "eye shadow", "brow", "kajal", "eye pencil"]
 };
 
-const BEAUTY_HINTS = [
-  ...CATEGORY_KEYWORDS.fragrances,
-  ...CATEGORY_KEYWORDS["lip-care"],
-  ...CATEGORY_KEYWORDS["skin-care"],
-  ...CATEGORY_KEYWORDS["eye-makeup"],
-  "makeup",
-  "cosmetic",
-  "beauty"
-];
+const CATEGORY_TAG_HINTS = {
+  fragrances: ["perfume", "fragrance", "deodorant", "cologne", "parfum"],
+  "lip-care": ["lip", "lipstick", "lip-balm", "lip-gloss", "lip-care"],
+  "skin-care": ["skin-care", "body-wash", "cleanser", "moisturizer", "serum", "lotion", "face-wash", "cream"],
+  "eye-makeup": ["eye-makeup", "eyeliner", "mascara", "eyeshadow", "kajal", "brow"]
+};
 
 const RISK_INGREDIENTS = [
   { key: "paraben", penalty: 13, note: "Parabens can act as endocrine disruptor candidates." },
@@ -64,19 +61,30 @@ const ECO_LABEL_SIGNALS = [
   "fsc"
 ];
 
-const FUN_FACTS = [
-  "Refillable beauty packaging can reduce packaging waste by up to 70% across repeated purchases.",
-  "Synthetic fragrance blends can contain dozens of compounds, so transparency labels matter for sensitivity tracking.",
-  "Even small swaps to fragrance-free or low-irritant formulas can reduce cumulative skin barrier stress over time.",
-  "Products with clear ingredient disclosure make it easier to compare safety and sustainability side by side.",
-  "Using one multi-purpose product (like lip-cheek tint) can reduce both packaging and total consumption."
-];
+const FUN_FACTS = {
+  quick: [
+    "Refillable beauty packaging can reduce packaging waste by up to 70% across repeated purchases.",
+    "Using one multi-purpose product can reduce both waste and overconsumption.",
+    "Picking concentrated formulas often cuts water-heavy packaging and transport weight."
+  ],
+  eco: [
+    "Choosing refill packs and recycled-material bottles lowers lifecycle plastic demand.",
+    "Microplastic-linked polymers can persist for years, so polymer-free formulas matter.",
+    "Cruelty-free + transparent sourcing labels make eco-comparisons easier."
+  ],
+  body: [
+    "Fragrance-free options can be gentler for reactive or sensitized skin barriers.",
+    "Shorter ingredient lists can make sensitivity tracking and patch-testing easier.",
+    "Barrier-supporting ingredients like ceramides and glycerin can improve tolerance."
+  ]
+};
 
 const state = {
   activeCategory: "all",
   suggestionItems: [],
   lastAnalyses: [],
-  selectedId: null
+  selectedId: null,
+  factType: "quick"
 };
 
 const refs = {
@@ -87,10 +95,12 @@ const refs = {
   categoryRow: document.getElementById("categoryRow"),
   productPanel: document.getElementById("productPanel"),
   scoreGrid: document.getElementById("scoreGrid"),
+  matchesGrid: document.getElementById("matchesGrid"),
   riskList: document.getElementById("riskList"),
   goodList: document.getElementById("goodList"),
   alternativesGrid: document.getElementById("alternativesGrid"),
-  funFact: document.getElementById("funFact")
+  funFact: document.getElementById("funFact"),
+  factButtons: document.getElementById("factButtons")
 };
 
 function debounce(fn, delay = 300) {
@@ -111,6 +121,21 @@ function randomItem(items) {
 
 function setStatus(text) {
   refs.statusText.textContent = text;
+}
+
+function categoryTerms(category) {
+  return [...(CATEGORY_KEYWORDS[category] || []), ...(CATEGORY_TAG_HINTS[category] || [])];
+}
+
+function categoryBlob(product) {
+  const tags = Array.isArray(product.categoriesTags) ? product.categoriesTags.join(" ") : "";
+  return `${product.name} ${product.categories} ${tags}`.toLowerCase();
+}
+
+function categoryMatch(product, category) {
+  if (category === "all") return true;
+  const blob = categoryBlob(product);
+  return categoryTerms(category).some((term) => blob.includes(term));
 }
 
 function escapeHtml(value) {
@@ -139,25 +164,15 @@ function toTitleCase(text) {
 }
 
 function categoryLabel(product) {
-  const haystack = `${product.name} ${product.categories}`.toLowerCase();
-  if (CATEGORY_KEYWORDS.fragrances.some((term) => haystack.includes(term))) return "Fragrances";
-  if (CATEGORY_KEYWORDS["lip-care"].some((term) => haystack.includes(term))) return "Lip Care";
-  if (CATEGORY_KEYWORDS["eye-makeup"].some((term) => haystack.includes(term))) return "Eye Makeup";
-  if (CATEGORY_KEYWORDS["skin-care"].some((term) => haystack.includes(term))) return "Skin Care";
+  if (categoryMatch(product, "fragrances")) return "Fragrances";
+  if (categoryMatch(product, "lip-care")) return "Lip Care";
+  if (categoryMatch(product, "eye-makeup")) return "Eye Makeup";
+  if (categoryMatch(product, "skin-care")) return "Skin Care";
   return "Beauty";
 }
 
 function matchesActiveCategory(product) {
-  if (state.activeCategory === "all") return true;
-  const haystack = `${product.name} ${product.categories}`.toLowerCase();
-  return CATEGORY_KEYWORDS[state.activeCategory].some((term) => haystack.includes(term));
-}
-
-function isBeautyCandidate(rawProduct) {
-  const name = (rawProduct.product_name || "").toLowerCase();
-  const categories = (rawProduct.categories || "").toLowerCase();
-  const blob = `${name} ${categories}`;
-  return BEAUTY_HINTS.some((term) => blob.includes(term));
+  return categoryMatch(product, state.activeCategory);
 }
 
 function normalizeProduct(rawProduct) {
@@ -176,12 +191,14 @@ function normalizeProduct(rawProduct) {
 
   const packaging = Array.isArray(rawProduct.packaging_tags) ? rawProduct.packaging_tags : [];
   const labels = Array.isArray(rawProduct.labels_tags) ? rawProduct.labels_tags : [];
+  const categoriesTags = Array.isArray(rawProduct.categories_tags) ? rawProduct.categories_tags : [];
 
   return {
     id: rawProduct.code || rawProduct.id || `${name}-${Math.random().toString(36).slice(2, 8)}`,
     name,
     brand: (rawProduct.brands || "Unknown brand").split(",")[0].trim(),
     categories: rawProduct.categories || "",
+    categoriesTags,
     ingredientsText,
     searchableIngredients: `${ingredientsText} ${ingredientsTagsText}`.toLowerCase(),
     ecoGrade: (rawProduct.ecoscore_grade || "").toLowerCase(),
@@ -393,6 +410,35 @@ function renderAlternatives(selectedAnalysis, allAnalyses) {
     .join("");
 }
 
+function renderMatches(analyses, selectedId = null) {
+  const rows = analyses.slice(0, 16);
+  if (!rows.length) {
+    refs.matchesGrid.innerHTML = `<p class="empty-state">Your matching products will appear here after search.</p>`;
+    return;
+  }
+
+  refs.matchesGrid.innerHTML = rows
+    .map(
+      (entry, index) => `
+      <button type="button" class="match-card ${entry.product.id === selectedId ? "active" : ""}" data-midx="${index}">
+        <p class="match-name">${escapeHtml(entry.product.name)}</p>
+        <p class="match-brand">${escapeHtml(entry.product.brand)}</p>
+        <span class="match-score">Score ${entry.overallScore}</span>
+      </button>
+    `
+    )
+    .join("");
+}
+
+function renderSelectedAnalysis(analysis, allAnalyses) {
+  state.selectedId = analysis.product.id;
+  renderProduct(analysis);
+  renderScores(analysis);
+  renderInsightLists(analysis);
+  renderAlternatives(analysis, allAnalyses);
+  renderMatches(allAnalyses, analysis.product.id);
+}
+
 function relevanceScore(product, query) {
   const q = query.trim().toLowerCase();
   if (!q) return 0;
@@ -409,27 +455,56 @@ function relevanceScore(product, query) {
 function renderEmptyState(message) {
   refs.productPanel.innerHTML = `<h2>Product Overview</h2><p class="empty-state">${escapeHtml(message)}</p>`;
   refs.scoreGrid.innerHTML = `<p class="empty-state">Scores appear after product analysis.</p>`;
+  refs.matchesGrid.innerHTML = `<p class="empty-state">Your matching products will appear here after search.</p>`;
   refs.riskList.innerHTML = "";
   refs.goodList.innerHTML = "";
   refs.alternativesGrid.innerHTML =
     `<p class="empty-state">When a better option is found in the same search set, it will appear here.</p>`;
 }
 
-async function fetchProducts(query, pageSize = 28) {
-  const params = new URLSearchParams({
-    search_terms: query,
-    search_simple: "1",
-    action: "process",
-    json: "1",
-    page_size: String(pageSize),
-    fields:
-      "code,id,product_name,brands,categories,ingredients_text,ingredients_text_en,ingredients_tags,ecoscore_grade,image_front_url,image_url,url,labels_tags,packaging_tags"
-  });
+function factPool(type) {
+  if (type === "random") {
+    return [...FUN_FACTS.quick, ...FUN_FACTS.eco, ...FUN_FACTS.body];
+  }
+  return FUN_FACTS[type] || FUN_FACTS.quick;
+}
 
-  const response = await fetch(`${API_BASE}?${params.toString()}`);
-  if (!response.ok) throw new Error("Unable to fetch product records.");
-  const payload = await response.json();
-  return Array.isArray(payload.products) ? payload.products : [];
+function renderFunFact(type = state.factType) {
+  const pool = factPool(type);
+  refs.funFact.textContent = randomItem(pool);
+}
+
+async function fetchProducts(query, pageSize = 30, pages = 1) {
+  const allProducts = [];
+  const seenCodes = new Set();
+
+  for (let page = 1; page <= pages; page += 1) {
+    const params = new URLSearchParams({
+      search_terms: query,
+      search_simple: "1",
+      action: "process",
+      json: "1",
+      page_size: String(pageSize),
+      page: String(page),
+      fields:
+        "code,id,product_name,brands,categories,categories_tags,ingredients_text,ingredients_text_en,ingredients_tags,ecoscore_grade,image_front_url,image_url,url,labels_tags,packaging_tags"
+    });
+
+    const response = await fetch(`${API_BASE}?${params.toString()}`);
+    if (!response.ok) throw new Error("Unable to fetch product records.");
+    const payload = await response.json();
+    const rows = Array.isArray(payload.products) ? payload.products : [];
+
+    for (const row of rows) {
+      const code = row.code || row.id || `${row.product_name || ""}-${Math.random()}`;
+      if (!seenCodes.has(code)) {
+        seenCodes.add(code);
+        allProducts.push(row);
+      }
+    }
+  }
+
+  return allProducts;
 }
 
 async function loadSuggestions(query) {
@@ -439,9 +514,8 @@ async function loadSuggestions(query) {
   }
 
   try {
-    const rows = await fetchProducts(query, 10);
+    const rows = await fetchProducts(query, 20, 1);
     const list = rows
-      .filter(isBeautyCandidate)
       .map(normalizeProduct)
       .filter(Boolean)
       .filter(matchesActiveCategory);
@@ -491,9 +565,8 @@ async function analyzeQuery(query, preferredProductName = "") {
   refs.suggestions.classList.add("hidden");
 
   try {
-    const rows = await fetchProducts(query, 36);
+    const rows = await fetchProducts(query, 50, 2);
     const products = rows
-      .filter(isBeautyCandidate)
       .map(normalizeProduct)
       .filter(Boolean)
       .filter(matchesActiveCategory);
@@ -505,7 +578,6 @@ async function analyzeQuery(query, preferredProductName = "") {
     }
 
     const analyses = products.map(analyzeProduct);
-    state.lastAnalyses = analyses;
 
     analyses.sort((a, b) => {
       const preferredBoostA = preferredProductName &&
@@ -521,12 +593,9 @@ async function analyzeQuery(query, preferredProductName = "") {
       return rankB - rankA;
     });
 
+    state.lastAnalyses = analyses;
     const selected = analyses[0];
-    state.selectedId = selected.product.id;
-    renderProduct(selected);
-    renderScores(selected);
-    renderInsightLists(selected);
-    renderAlternatives(selected, analyses);
+    renderSelectedAnalysis(selected, analyses);
     setStatus(`Analyzed ${products.length} products from Open Beauty Facts.`);
   } catch (error) {
     setStatus("Could not load product data right now. Please retry in a moment.");
@@ -538,7 +607,9 @@ function setActiveCategory(category) {
   state.activeCategory = category;
   const buttons = Array.from(refs.categoryRow.querySelectorAll(".category-pill"));
   for (const button of buttons) {
-    button.classList.toggle("active", button.dataset.category === category);
+    const active = button.dataset.category === category;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
   }
 }
 
@@ -570,6 +641,16 @@ function setupEvents() {
     analyzeQuery(`${selected.name} ${selected.brand}`, selected.name);
   });
 
+  refs.matchesGrid.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-midx]");
+    if (!button) return;
+    const index = Number(button.dataset.midx);
+    const selected = state.lastAnalyses[index];
+    if (!selected) return;
+    renderSelectedAnalysis(selected, state.lastAnalyses);
+    setStatus(`Viewing ${selected.product.name}.`);
+  });
+
   refs.categoryRow.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-category]");
     if (!button) return;
@@ -579,7 +660,23 @@ function setupEvents() {
     if (query.length >= 2) {
       loadSuggestions(query);
       analyzeQuery(query);
+    } else {
+      setStatus(`Category: ${button.textContent}. Type a product name to analyze.`);
     }
+  });
+
+  refs.factButtons.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-fact-type]");
+    if (!button) return;
+
+    const type = button.dataset.factType;
+    state.factType = type;
+
+    const allButtons = Array.from(refs.factButtons.querySelectorAll(".fact-btn"));
+    for (const factButton of allButtons) {
+      factButton.classList.toggle("active", factButton.dataset.factType === type);
+    }
+    renderFunFact(type);
   });
 
   document.addEventListener("click", (event) => {
@@ -594,7 +691,7 @@ function setupEvents() {
 }
 
 function init() {
-  refs.funFact.textContent = randomItem(FUN_FACTS);
+  renderFunFact("quick");
   setupEvents();
 }
 

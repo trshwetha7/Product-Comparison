@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GlowKind | Clean Beauty Finder</title>
+  <title>Glow Kind | Clean Beauty Finder</title>
   <meta
     name="description"
     content="Search beauty products and get an instant body-friendliness and environmental impact overview, with cleaner alternatives."
@@ -24,21 +24,13 @@
   <header class="hero shell">
     <div class="hero-copy">
       <p class="eyebrow">Sustainable Beauty Companion</p>
-      <h1>GlowKind</h1>
+      <h1>Glow Kind <span class="sparkle">✨</span></h1>
       <p class="subtitle">
         Type any beauty product to estimate how body-friendly and eco-friendly it is, then discover cleaner swaps.
       </p>
     </div>
 
     <div class="search-card">
-      <div class="category-row" id="categoryRow">
-        <button class="category-pill active" data-category="all">All</button>
-        <button class="category-pill" data-category="fragrances">Fragrances</button>
-        <button class="category-pill" data-category="lip-care">Lip Care</button>
-        <button class="category-pill" data-category="skin-care">Skin Care</button>
-        <button class="category-pill" data-category="eye-makeup">Eye Makeup</button>
-      </div>
-
       <label for="searchInput" class="input-label">Search product</label>
       <div class="search-row">
         <input
@@ -48,6 +40,15 @@
           autocomplete="off"
         />
         <button id="searchBtn" type="button">Analyze</button>
+      </div>
+
+      <p class="tabs-label">Choose Category</p>
+      <div class="category-row" id="categoryRow" role="tablist" aria-label="Beauty categories">
+        <button class="category-pill active" data-category="all" role="tab" aria-selected="true">All</button>
+        <button class="category-pill" data-category="fragrances" role="tab" aria-selected="false">Fragrances</button>
+        <button class="category-pill" data-category="lip-care" role="tab" aria-selected="false">Lip Care</button>
+        <button class="category-pill" data-category="skin-care" role="tab" aria-selected="false">Skin Care</button>
+        <button class="category-pill" data-category="eye-makeup" role="tab" aria-selected="false">Eye Makeup</button>
       </div>
 
       <ul id="suggestions" class="suggestions hidden" role="listbox" aria-label="Product suggestions"></ul>
@@ -68,6 +69,13 @@
           <p class="empty-state">Scores appear after product analysis.</p>
         </div>
       </article>
+    </section>
+
+    <section class="panel matches-panel">
+      <h2>Matched Products</h2>
+      <div id="matchesGrid" class="matches-grid">
+        <p class="empty-state">Your matching products will appear here after search.</p>
+      </div>
     </section>
 
     <section class="panel insights-panel" id="insightsPanel">
@@ -96,7 +104,13 @@
 
     <section class="panel fun-panel">
       <h2>Fun Sustainability Snippet</h2>
-      <p id="funFact"></p>
+      <div id="factButtons" class="fact-buttons">
+        <button type="button" class="fact-btn active" data-fact-type="quick">Quick Fact</button>
+        <button type="button" class="fact-btn" data-fact-type="eco">Eco Fact</button>
+        <button type="button" class="fact-btn" data-fact-type="body">Body Fact</button>
+        <button type="button" class="fact-btn" data-fact-type="random">Random Fact</button>
+      </div>
+      <p id="funFact" class="fun-fact-text"></p>
     </section>
   </main>
 
