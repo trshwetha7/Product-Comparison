@@ -197,6 +197,13 @@ function ecoGradeToScore(grade) {
   return map[grade] || null;
 }
 
+function ingredientMatch(text, key) {
+  if (key === "bha" || key === "bht") {
+    return new RegExp(`\\b${key}\\b`).test(text);
+  }
+  return text.includes(key);
+}
+
 function analyzeProduct(product) {
   let bodyScore = 88;
   let ecoScore = 76;
@@ -205,7 +212,7 @@ function analyzeProduct(product) {
 
   const text = product.searchableIngredients;
   for (const risk of RISK_INGREDIENTS) {
-    if (text.includes(risk.key)) {
+    if (ingredientMatch(text, risk.key)) {
       risks.push(risk);
       bodyScore -= risk.penalty;
       if (
