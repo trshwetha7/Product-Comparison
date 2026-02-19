@@ -1,4 +1,5 @@
 const API_BASE = "https://world.openbeautyfacts.org/cgi/search.pl";
+const MAKEUP_API_BASE = "https://makeup-api.herokuapp.com/api/v1/products.json";
 const CATEGORY_KEYWORDS = {
   all: [],
   fragrances: ["perfume", "fragrance", "deodorant", "cologne", "eau de", "body mist", "parfum"],
@@ -15,12 +16,33 @@ const CATEGORY_TAG_HINTS = {
 };
 
 const ALT_SEARCH_TERMS = {
-  all: "beauty makeup skincare fragrance",
+  all: "beauty makeup lipstick skincare fragrance clean",
   fragrances: "perfume fragrance eau de parfum body mist deodorant",
   "lip-care": "lip balm lipstick lip gloss lip tint",
   "skin-care": "skin care cleanser moisturizer serum body wash",
   "eye-makeup": "eyeliner mascara kajal eyeshadow brow pencil"
 };
+
+const MAKEUP_TYPE_BY_CATEGORY = {
+  all: [],
+  fragrances: [],
+  "lip-care": ["lipstick", "lip_liner"],
+  "skin-care": ["foundation", "bb_cc", "concealer", "powder"],
+  "eye-makeup": ["eyeliner", "eyeshadow", "mascara", "eyebrow", "pencil"]
+};
+
+const CLEAN_TAG_HINTS = [
+  "natural",
+  "organic",
+  "vegan",
+  "cruelty free",
+  "ecocert",
+  "certclean",
+  "chemical free",
+  "silicone free",
+  "oil free",
+  "ewg verified"
+];
 
 const RISK_INGREDIENTS = [
   { key: "paraben", penalty: 13, note: "Parabens can act as endocrine disruptor candidates." },
@@ -180,6 +202,24 @@ function safeUrl(rawUrl) {
   }
 }
 
+function isLikelyProductImage(url) {
+  if (!url || url === "#") return false;
+  const lower = url.toLowerCase();
+  const blockedHints = ["qr", "barcode", "datamatrix", "code-", "ingredients", "nutrition"];
+  return !blockedHints.some((hint) => lower.includes(hint));
+}
+
+function pickBestImage(candidates) {
+  const safeCandidates = (candidates || [])
+    .map((value) => safeUrl(value))
+    .filter((value) => value !== "#");
+
+  for (const candidate of safeCandidates) {
+    if (isLikelyProductImage(candidate)) return candidate;
+  }
+  return safeCandidates[0] || "";
+}
+
 function toTitleCase(text) {
   return text
     .split(" ")
@@ -225,7 +265,12 @@ function uniqueAnalyses(analyses) {
   return unique;
 }
 
-function normalizeProduct(rawProduct) {
+function hasCleanTag(tags) {
+  const blob = (tags || []).join(" ").toLowerCase();
+  return CLEAN_TAG_HINTS.some((hint) => blob.includes(hint));
+}
+
+function normalizeOpenBeautyProduct(rawProduct) {
   const name = (rawProduct.product_name || "").trim();
   if (!name) return null;
 
@@ -243,8 +288,15 @@ function normalizeProduct(rawProduct) {
   const labels = Array.isArray(rawProduct.labels_tags) ? rawProduct.labels_tags : [];
   const categoriesTags = Array.isArray(rawProduct.categories_tags) ? rawProduct.categories_tags : [];
 
+  const imageCandidates = [
+    rawProduct.image_front_url,
+    rawProduct.image_url,
+    rawProduct.image_front_small_url,
+    rawProduct.image_small_url
+  ];
+
   return {
-    id: rawProduct.code || rawProduct.id || `${name}-${Math.random().toString(36).slice(2, 8)}`,
+    id: rawProduct.code || rawProduct.id || `obf-${name}-${Math.random().toString(36).slice(2, 8)}`,
     name,
     brand: (rawProduct.brands || "Unknown brand").split(",")[0].trim(),
     categories: rawProduct.categories || "",
@@ -254,8 +306,44 @@ function normalizeProduct(rawProduct) {
     ecoGrade: (rawProduct.ecoscore_grade || "").toLowerCase(),
     packaging,
     labels,
-    imageUrl: rawProduct.image_front_url || rawProduct.image_url || "",
-    sourceUrl: rawProduct.url || `https://world.openbeautyfacts.org/product/${rawProduct.code || ""}`
+    imageUrl: pickBestImage(imageCandidates),
+    sourceUrl: rawProduct.url || `https://world.openbeautyfacts.org/product/${rawProduct.code || ""}`,
+    source: "open_beauty_facts",
+    cleanTagBoost: hasCleanTag(labels)
+  };
+}
+
+function normalizeMakeupApiProduct(rawProduct) {
+  const name = (rawProduct.name || "").trim();
+  if (!name) return null;
+
+  const tagList = Array.isArray(rawProduct.tag_list) ? rawProduct.tag_list : [];
+  const brand = (rawProduct.brand || "Unknown brand").trim();
+  const productType = (rawProduct.product_type || "").replace(/_/g, " ");
+  const productCategory = (rawProduct.category || "").replace(/_/g, " ");
+  const categoriesTags = [productType, productCategory, ...tagList]
+    .map((value) => String(value || "").toLowerCase().trim())
+    .filter(Boolean);
+
+  const ingredientList = (rawProduct.ingredient_list || "").trim();
+  const labels = tagList.map((tag) => `en:${String(tag).toLowerCase()}`);
+  const imageCandidates = [rawProduct.api_featured_image, rawProduct.image_link];
+
+  return {
+    id: rawProduct.id ? `makeup-${rawProduct.id}` : `makeup-${name}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    brand,
+    categories: [productType, productCategory].filter(Boolean).join(", "),
+    categoriesTags,
+    ingredientsText: ingredientList,
+    searchableIngredients: `${ingredientList} ${tagList.join(" ")}`.toLowerCase(),
+    ecoGrade: "",
+    packaging: [],
+    labels,
+    imageUrl: pickBestImage(imageCandidates),
+    sourceUrl: rawProduct.product_link || rawProduct.website_link || "",
+    source: "makeup_api",
+    cleanTagBoost: hasCleanTag(tagList)
   };
 }
 
@@ -314,6 +402,11 @@ function analyzeProduct(product) {
   if (ecoFromGrade !== null) ecoScore = ecoFromGrade;
   else ecoScore -= 8;
 
+  if (product.cleanTagBoost) {
+    bodyScore += 3;
+    ecoScore += 5;
+  }
+
   const packagingText = product.packaging.join(" ").toLowerCase();
   if (packagingText.includes("plastic")) ecoScore -= 10;
   if (packagingText.includes("glass")) ecoScore += 4;
@@ -330,6 +423,11 @@ function analyzeProduct(product) {
   bodyScore = clamp(Math.round(bodyScore), 5, 98);
   ecoScore = clamp(Math.round(ecoScore), 8, 98);
   const overallScore = Math.round(bodyScore * 0.56 + ecoScore * 0.44);
+  const cleanScore = clamp(
+    Math.round(bodyScore * 0.62 + ecoScore * 0.38 - risks.length * 1.2 + positives.length * 1.4),
+    5,
+    99
+  );
 
   let confidence = 30;
   if (product.ingredientsText) confidence += 35;
@@ -345,6 +443,7 @@ function analyzeProduct(product) {
     bodyScore,
     ecoScore,
     overallScore,
+    cleanScore,
     confidence
   };
 }
@@ -363,7 +462,8 @@ function buildOverview(analysis) {
     ? `Detected ${risks.length} notable ingredient watch-outs.`
     : "No major watch-out ingredients were flagged from available data.";
 
-  return `${product.name} (${product.brand}) scores ${overallScore}/100 (${tone}). ${riskSummary} Confidence: ${confidence}% based on ingredient and labeling completeness.`;
+  const sourceText = product.source === "makeup_api" ? "Makeup API" : "Open Beauty Facts";
+  return `${product.name} (${product.brand}) scores ${overallScore}/100 (${tone}). ${riskSummary} Confidence: ${confidence}% from ingredient + label data (${sourceText}).`;
 }
 
 function renderProduct(analysis) {
@@ -373,6 +473,7 @@ function renderProduct(analysis) {
   const safeCategory = escapeHtml(categoryLabel(product));
   const safeOverview = escapeHtml(buildOverview(analysis));
   const sourceUrl = safeUrl(product.sourceUrl);
+  const sourceLabel = product.source === "makeup_api" ? "Makeup API" : "Open Beauty Facts";
   const image = product.imageUrl
     ? `<img class="product-image" src="${safeUrl(product.imageUrl)}" alt="${safeName}" />`
     : `<div class="product-image" aria-hidden="true"></div>`;
@@ -385,7 +486,7 @@ function renderProduct(analysis) {
         <h3>${safeName}</h3>
         <p><strong>Brand:</strong> ${safeBrand}</p>
         <p><strong>Category:</strong> ${safeCategory}</p>
-        <p><a href="${sourceUrl}" target="_blank" rel="noreferrer">View source listing</a></p>
+        <p><strong>Source:</strong> ${sourceUrl === "#" ? escapeHtml(sourceLabel) : `<a href="${sourceUrl}" target="_blank" rel="noreferrer">${escapeHtml(sourceLabel)}</a>`}</p>
       </div>
     </div>
     <p class="overview">${safeOverview}</p>
@@ -437,30 +538,38 @@ function renderInsightLists(analysis) {
 function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
   const selectedBrand = selectedAnalysis.product.brand.toLowerCase();
   const selectedKey = analysisKey(selectedAnalysis);
+  const selectedRiskCount = selectedAnalysis.risks.length;
 
   const ranked = analyses
     .filter((analysis) => analysisKey(analysis) !== selectedKey)
     .filter((analysis) => categoryKey === "all" || categoryMatch(analysis.product, categoryKey))
     .map((analysis) => {
-      const delta = analysis.overallScore - selectedAnalysis.overallScore;
+      const cleanDelta = analysis.cleanScore - selectedAnalysis.cleanScore;
+      const riskReduction = selectedRiskCount - analysis.risks.length;
       const differentBrand = analysis.product.brand.toLowerCase() !== selectedBrand;
       const rankValue =
-        analysis.overallScore +
-        (differentBrand ? 4 : 0) +
-        (delta > 0 ? delta * 0.45 : delta * 0.12) +
-        analysis.confidence * 0.03;
+        cleanDelta * 1.8 +
+        riskReduction * 2.1 +
+        (analysis.bodyScore - selectedAnalysis.bodyScore) * 0.6 +
+        (analysis.ecoScore - selectedAnalysis.ecoScore) * 0.42 +
+        analysis.cleanScore * 0.18 +
+        (differentBrand ? 2.2 : 0) +
+        analysis.confidence * 0.04;
 
       return {
         analysis,
-        delta,
+        cleanDelta,
+        riskReduction,
         differentBrand,
         rankValue
       };
     })
     .sort((a, b) => b.rankValue - a.rankValue);
 
-  const cleaner = ranked.filter((entry) => entry.delta >= 1).slice(0, 3);
-  if (cleaner.length >= 3) return cleaner;
+  const cleaner = ranked
+    .filter((entry) => entry.cleanDelta >= 4 || entry.riskReduction >= 1)
+    .slice(0, 4);
+  if (cleaner.length >= 3) return cleaner.slice(0, 3);
 
   const picked = [...cleaner];
   for (const entry of ranked) {
@@ -472,23 +581,30 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
 }
 
 async function fetchBroaderAlternatives(selectedAnalysis, categoryKey) {
-  const cacheKey = categoryKey;
+  const cacheKey = `${categoryKey}::alt`;
   if (state.alternativeCache[cacheKey]) {
     return state.alternativeCache[cacheKey];
   }
 
-  const selectedNameHint = selectedAnalysis.product.name.split(" ").slice(0, 2).join(" ");
-  const query = ALT_SEARCH_TERMS[categoryKey] || `${selectedNameHint} beauty`;
-  const rows = await fetchProducts(query, 50, 2);
+  const query = ALT_SEARCH_TERMS[categoryKey] || ALT_SEARCH_TERMS.all;
+  const rows = await fetchProducts(query, 60, 2);
   const analyses = rows
-    .map(normalizeProduct)
-    .filter(Boolean)
     .filter((product) => categoryKey === "all" || categoryMatch(product, categoryKey))
     .map(analyzeProduct);
 
   const deduped = uniqueAnalyses(analyses);
   state.alternativeCache[cacheKey] = deduped;
   return deduped;
+}
+
+function alternativeReason(selectedAnalysis, entry) {
+  const reasons = [];
+  if (entry.cleanDelta >= 1) reasons.push(`clean score +${entry.cleanDelta}`);
+  if (entry.riskReduction >= 1) reasons.push(`${entry.riskReduction} fewer risk flag${entry.riskReduction > 1 ? "s" : ""}`);
+  if (entry.analysis.bodyScore > selectedAnalysis.bodyScore) reasons.push(`better body profile`);
+  if (entry.analysis.ecoScore > selectedAnalysis.ecoScore) reasons.push(`better eco profile`);
+  if (entry.differentBrand) reasons.push("different brand option");
+  return reasons.slice(0, 2).join(" • ") || "similar profile alternative";
 }
 
 async function renderAlternatives(selectedAnalysis, allAnalyses) {
@@ -515,13 +631,16 @@ async function renderAlternatives(selectedAnalysis, allAnalyses) {
   }
 
   refs.alternativesGrid.innerHTML = alternatives
-    .map(({ analysis, delta, differentBrand }) => {
-      const badge = delta >= 1 ? `Cleaner +${delta}` : differentBrand ? "Similar Option" : "Alternative";
+    .map((entry) => {
+      const { analysis, cleanDelta } = entry;
+      const badge = cleanDelta >= 1 ? `Cleaner +${cleanDelta}` : "Alternative";
+      const reason = alternativeReason(selectedAnalysis, entry);
       return `
       <article class="alt-card">
         <h3>${escapeHtml(analysis.product.name)}</h3>
         <p>${escapeHtml(analysis.product.brand)}</p>
         <span class="alt-badge">${badge} · Score ${analysis.overallScore}</span>
+        <p>${escapeHtml(reason)}</p>
         <p>${escapeHtml(buildOverview(analysis))}</p>
       </article>
     `;
@@ -595,7 +714,25 @@ function renderFunFact(type = state.factType) {
   refs.funFact.textContent = selectedFact;
 }
 
-async function fetchProducts(query, pageSize = 30, pages = 1) {
+function queryTokens(query) {
+  return query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 2);
+}
+
+function inferMakeupTypesFromQuery(query) {
+  const q = query.toLowerCase();
+  const matches = [];
+  if (q.includes("lip")) matches.push("lipstick", "lip_liner");
+  if (q.includes("eye") || q.includes("liner") || q.includes("mascara")) matches.push("eyeliner", "eyeshadow", "mascara");
+  if (q.includes("brow")) matches.push("eyebrow");
+  if (q.includes("foundation") || q.includes("concealer")) matches.push("foundation", "concealer");
+  return [...new Set(matches)];
+}
+
+async function fetchOpenBeautyProducts(query, pageSize = 30, pages = 1) {
   const allProducts = [];
   const seenCodes = new Set();
 
@@ -608,11 +745,11 @@ async function fetchProducts(query, pageSize = 30, pages = 1) {
       page_size: String(pageSize),
       page: String(page),
       fields:
-        "code,id,product_name,brands,categories,categories_tags,ingredients_text,ingredients_text_en,ingredients_tags,ecoscore_grade,image_front_url,image_url,url,labels_tags,packaging_tags"
+        "code,id,product_name,brands,categories,categories_tags,ingredients_text,ingredients_text_en,ingredients_tags,ecoscore_grade,image_front_url,image_front_small_url,image_url,image_small_url,url,labels_tags,packaging_tags"
     });
 
     const response = await fetch(`${API_BASE}?${params.toString()}`);
-    if (!response.ok) throw new Error("Unable to fetch product records.");
+    if (!response.ok) throw new Error("Unable to fetch Open Beauty Facts records.");
     const payload = await response.json();
     const rows = Array.isArray(payload.products) ? payload.products : [];
 
@@ -620,12 +757,100 @@ async function fetchProducts(query, pageSize = 30, pages = 1) {
       const code = row.code || row.id || `${row.product_name || ""}-${Math.random()}`;
       if (!seenCodes.has(code)) {
         seenCodes.add(code);
-        allProducts.push(row);
+        const normalized = normalizeOpenBeautyProduct(row);
+        if (normalized) allProducts.push(normalized);
       }
     }
   }
 
   return allProducts;
+}
+
+function makeupRelevance(rawProduct, query) {
+  const q = query.toLowerCase().trim();
+  const tokens = queryTokens(query);
+  const name = (rawProduct.name || "").toLowerCase();
+  const brand = (rawProduct.brand || "").toLowerCase();
+  const productType = (rawProduct.product_type || "").toLowerCase();
+  const category = (rawProduct.category || "").toLowerCase();
+
+  let points = 0;
+  if (name.includes(q) || brand.includes(q)) points += 9;
+  for (const token of tokens) {
+    if (name.includes(token)) points += 2.5;
+    if (brand.includes(token)) points += 2;
+    if (productType.includes(token) || category.includes(token)) points += 1.3;
+  }
+  return points;
+}
+
+async function fetchMakeupProducts(query, category = "all") {
+  const tokenList = queryTokens(query);
+  const brandCandidate = tokenList.slice(0, 2).join(" ");
+  const firstToken = tokenList[0] || "";
+  const categoryTypes = MAKEUP_TYPE_BY_CATEGORY[category] || [];
+  const inferredTypes = inferMakeupTypesFromQuery(query);
+  const types = [...new Set([...categoryTypes, ...inferredTypes])].slice(0, 4);
+
+  const requests = [];
+  if (brandCandidate) requests.push(`${MAKEUP_API_BASE}?brand=${encodeURIComponent(brandCandidate)}`);
+  if (firstToken && firstToken !== brandCandidate) requests.push(`${MAKEUP_API_BASE}?brand=${encodeURIComponent(firstToken)}`);
+  for (const type of types) {
+    requests.push(`${MAKEUP_API_BASE}?product_type=${encodeURIComponent(type)}`);
+  }
+  if (!requests.length) requests.push(MAKEUP_API_BASE);
+
+  const settled = await Promise.allSettled(
+    requests.map(async (url) => {
+      const response = await fetch(url);
+      if (!response.ok) return [];
+      const payload = await response.json();
+      return Array.isArray(payload) ? payload : [];
+    })
+  );
+
+  const merged = [];
+  const seen = new Set();
+  for (const result of settled) {
+    if (result.status !== "fulfilled") continue;
+    for (const row of result.value) {
+      const id = row.id ? `makeup-${row.id}` : `${row.name || ""}-${row.brand || ""}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      merged.push(row);
+    }
+  }
+
+  return merged
+    .map((row) => ({ row, score: makeupRelevance(row, query) }))
+    .filter((item) => item.score > 1.3)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 120)
+    .map((item) => normalizeMakeupApiProduct(item.row))
+    .filter(Boolean);
+}
+
+function uniqueProducts(products) {
+  const unique = [];
+  const seen = new Set();
+  for (const product of products) {
+    const key = `${product.name.toLowerCase()}::${product.brand.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(product);
+  }
+  return unique;
+}
+
+async function fetchProducts(query, pageSize = 40, pages = 2) {
+  const [openBeautyResult, makeupResult] = await Promise.allSettled([
+    fetchOpenBeautyProducts(query, pageSize, pages),
+    fetchMakeupProducts(query, state.activeCategory)
+  ]);
+
+  const openBeautyProducts = openBeautyResult.status === "fulfilled" ? openBeautyResult.value : [];
+  const makeupProducts = makeupResult.status === "fulfilled" ? makeupResult.value : [];
+  return uniqueProducts([...openBeautyProducts, ...makeupProducts]);
 }
 
 async function loadSuggestions(query) {
@@ -637,8 +862,6 @@ async function loadSuggestions(query) {
   try {
     const rows = await fetchProducts(query, 20, 1);
     const list = rows
-      .map(normalizeProduct)
-      .filter(Boolean)
       .filter(matchesActiveCategory);
 
     const unique = [];
@@ -686,10 +909,8 @@ async function analyzeQuery(query, preferredProductName = "") {
   refs.suggestions.classList.add("hidden");
 
   try {
-    const rows = await fetchProducts(query, 50, 2);
+    const rows = await fetchProducts(query, 60, 3);
     const products = rows
-      .map(normalizeProduct)
-      .filter(Boolean)
       .filter(matchesActiveCategory);
 
     if (!products.length) {
@@ -718,7 +939,9 @@ async function analyzeQuery(query, preferredProductName = "") {
     const selected = analyses[0];
     renderSelectedAnalysis(selected, analyses);
     renderFunFact(state.factType);
-    setStatus(`Analyzed ${products.length} products from Open Beauty Facts.`);
+    const makeupCount = products.filter((product) => product.source === "makeup_api").length;
+    const obfCount = products.length - makeupCount;
+    setStatus(`Analyzed ${products.length} products (${obfCount} Open Beauty Facts + ${makeupCount} Makeup API).`);
   } catch (error) {
     setStatus("Could not load product data right now. Please retry in a moment.");
     renderEmptyState("Could not load product data right now.");
@@ -727,6 +950,7 @@ async function analyzeQuery(query, preferredProductName = "") {
 
 function setActiveCategory(category) {
   state.activeCategory = category;
+  state.alternativeCache = {};
   const buttons = Array.from(refs.categoryRow.querySelectorAll(".category-pill"));
   for (const button of buttons) {
     const active = button.dataset.category === category;
