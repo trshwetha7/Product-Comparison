@@ -98,6 +98,18 @@ const HIGH_IRRITANT_KEYS = [
   "sodium laureth sulfate"
 ];
 
+const AI_MODEL_WEIGHTS = {
+  bodyPct: 1.35,
+  ecoPct: 1.2,
+  cleanPct: 1.45,
+  hazardPct: -1.6,
+  endocrinePct: -1.45,
+  ecoRiskPct: -1.2,
+  irritantPct: -0.95,
+  positivePct: 0.9,
+  confidencePct: 0.7
+};
+
 const BENEFICIAL_INGREDIENTS = [
   "hyaluronic acid",
   "niacinamide",
@@ -182,6 +194,10 @@ function debounce(fn, delay = 300) {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function sigmoid(value) {
+  return 1 / (1 + Math.exp(-value));
 }
 
 function randomItem(items) {
@@ -393,6 +409,43 @@ function matchedRiskCount(risks, keys) {
   return risks.filter((risk) => keys.some((key) => risk.key.includes(key))).length;
 }
 
+function riskSeverity(risks, keys) {
+  return risks.reduce((total, risk) => {
+    if (!keys.some((key) => risk.key.includes(key))) return total;
+    return total + risk.penalty;
+  }, 0);
+}
+
+function percentile(values, value) {
+  if (!values.length) return 0.5;
+  const sorted = [...values].sort((a, b) => a - b);
+  let count = 0;
+  for (const current of sorted) {
+    if (current <= value) count += 1;
+  }
+  return clamp(count / sorted.length, 0, 1);
+}
+
+function tokenSet(text) {
+  return new Set(
+    String(text || "")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3)
+  );
+}
+
+function jaccardSimilarity(setA, setB) {
+  if (!setA.size || !setB.size) return 0;
+  let intersection = 0;
+  for (const item of setA) {
+    if (setB.has(item)) intersection += 1;
+  }
+  const union = setA.size + setB.size - intersection;
+  return union ? intersection / union : 0;
+}
+
 function analyzeProduct(product) {
   let bodyScore = 96;
   let ecoScore = 92;
@@ -471,9 +524,14 @@ function analyzeProduct(product) {
 
   const hormoneHits = matchedRiskCount(risks, ENDOCRINE_RISK_KEYS);
   const environmentHits = matchedRiskCount(risks, ENVIRONMENT_RISK_KEYS);
+  const irritantHits = matchedRiskCount(risks, HIGH_IRRITANT_KEYS);
+  const hormoneSeverity = riskSeverity(risks, ENDOCRINE_RISK_KEYS);
+  const environmentSeverity = riskSeverity(risks, ENVIRONMENT_RISK_KEYS);
+  const irritantSeverity = riskSeverity(risks, HIGH_IRRITANT_KEYS);
 
   bodyScore -= hormoneHits * 2.5;
   ecoScore -= environmentHits * 2.4;
+  bodyScore -= irritantHits * 1.5;
 
   bodyScore = clamp(Math.round(bodyScore), 1, 99);
   ecoScore = clamp(Math.round(ecoScore), 1, 99);
@@ -484,11 +542,23 @@ function analyzeProduct(product) {
       ecoScore * 0.44 -
       hormoneHits * 5 -
       environmentHits * 2.8 -
+      irritantHits * 2.1 -
       risks.length * 1.6 +
       positives.length * 1.4
     ),
     1,
     99
+  );
+
+  const hazardScore = clamp(
+    Math.round(
+      hormoneSeverity * 1.35 +
+      environmentSeverity * 1.1 +
+      irritantSeverity * 0.95 +
+      risks.length * 4
+    ),
+    0,
+    160
   );
 
   let confidence = 25;
@@ -498,6 +568,9 @@ function analyzeProduct(product) {
   if (product.packaging.length) confidence += 5;
   if (product.source === "makeup_api" && !product.ingredientsText) confidence -= 8;
   confidence = clamp(confidence, 15, 95);
+  const ingredientTokenCount = tokenSet(product.ingredientsText).size;
+  const positiveDensity = ingredientTokenCount ? positives.length / ingredientTokenCount : 0;
+  const profileTokens = tokenSet(`${product.name} ${product.brand} ${product.categories} ${product.ingredientsText}`);
 
   return {
     product,
@@ -505,6 +578,13 @@ function analyzeProduct(product) {
     positives,
     hormoneHits,
     environmentHits,
+    irritantHits,
+    hormoneSeverity,
+    environmentSeverity,
+    irritantSeverity,
+    hazardScore,
+    positiveDensity,
+    profileTokens,
     bodyScore,
     ecoScore,
     overallScore,
@@ -528,7 +608,9 @@ function buildOverview(analysis) {
     : "No major watch-out ingredients were flagged from available data.";
 
   const sourceText = product.source === "makeup_api" ? "Makeup API" : "Open Beauty Facts";
-  return `${product.name} (${product.brand}) scores ${overallScore}/100 (${tone}). ${riskSummary} Confidence: ${confidence}% from ingredient + label data (${sourceText}).`;
+  const aiClean = analysis.aiCleanScore || analysis.cleanScore;
+  const aiHazard = analysis.aiHazardIndex || analysis.hazardScore;
+  return `${product.name} (${product.brand}) scores ${overallScore}/100 (${tone}), AI Clean ${aiClean}/100 and Hazard ${aiHazard}. ${riskSummary} Confidence: ${confidence}% from ingredient + label data (${sourceText}).`;
 }
 
 function renderProduct(analysis) {
@@ -571,8 +653,10 @@ function scoreCardHtml(label, value, caption, color) {
 }
 
 function renderScores(analysis) {
+  const aiClean = analysis.aiCleanScore || analysis.cleanScore;
+  const hazardIndex = analysis.aiHazardIndex || analysis.hazardScore;
   refs.scoreGrid.innerHTML = `
-    ${scoreCardHtml("Overall", analysis.overallScore, scoreTone(analysis.overallScore), "#ff98bb")}
+    ${scoreCardHtml("AI Clean", aiClean, `Hazard ${hazardIndex}`, "#ff98bb")}
     ${scoreCardHtml("Body Friendly", analysis.bodyScore, "Hormone + skin signal", "#ffbe9a")}
     ${scoreCardHtml("Eco Friendly", analysis.ecoScore, "Packaging + formula signal", "#6fc39a")}
   `;
@@ -600,39 +684,109 @@ function renderInsightLists(analysis) {
   }
 }
 
+function applyAiModel(analyses) {
+  if (!analyses.length) return;
+
+  const bodyValues = analyses.map((analysis) => analysis.bodyScore);
+  const ecoValues = analyses.map((analysis) => analysis.ecoScore);
+  const cleanValues = analyses.map((analysis) => analysis.cleanScore);
+  const hazardValues = analyses.map((analysis) => analysis.hazardScore);
+  const endocrineValues = analyses.map((analysis) => analysis.hormoneSeverity);
+  const ecoRiskValues = analyses.map((analysis) => analysis.environmentSeverity);
+  const irritantValues = analyses.map((analysis) => analysis.irritantSeverity);
+  const positiveValues = analyses.map((analysis) => analysis.positiveDensity);
+  const confidenceValues = analyses.map((analysis) => analysis.confidence);
+
+  for (const analysis of analyses) {
+    const bodyPct = percentile(bodyValues, analysis.bodyScore);
+    const ecoPct = percentile(ecoValues, analysis.ecoScore);
+    const cleanPct = percentile(cleanValues, analysis.cleanScore);
+    const hazardPct = percentile(hazardValues, analysis.hazardScore);
+    const endocrinePct = percentile(endocrineValues, analysis.hormoneSeverity);
+    const ecoRiskPct = percentile(ecoRiskValues, analysis.environmentSeverity);
+    const irritantPct = percentile(irritantValues, analysis.irritantSeverity);
+    const positivePct = percentile(positiveValues, analysis.positiveDensity);
+    const confidencePct = percentile(confidenceValues, analysis.confidence);
+
+    const rawModelScore =
+      bodyPct * AI_MODEL_WEIGHTS.bodyPct +
+      ecoPct * AI_MODEL_WEIGHTS.ecoPct +
+      cleanPct * AI_MODEL_WEIGHTS.cleanPct +
+      hazardPct * AI_MODEL_WEIGHTS.hazardPct +
+      endocrinePct * AI_MODEL_WEIGHTS.endocrinePct +
+      ecoRiskPct * AI_MODEL_WEIGHTS.ecoRiskPct +
+      irritantPct * AI_MODEL_WEIGHTS.irritantPct +
+      positivePct * AI_MODEL_WEIGHTS.positivePct +
+      confidencePct * AI_MODEL_WEIGHTS.confidencePct;
+
+    const aiCleanScore = clamp(Math.round(sigmoid(rawModelScore * 2.25 - 2.2) * 100), 1, 99);
+    const aiHazardIndex = clamp(
+      Math.round(analysis.hazardScore * 0.7 + hazardPct * 38 + endocrinePct * 20 + ecoRiskPct * 16),
+      0,
+      180
+    );
+
+    analysis.ai = {
+      bodyPct,
+      ecoPct,
+      cleanPct,
+      hazardPct,
+      endocrinePct,
+      ecoRiskPct,
+      irritantPct,
+      positivePct,
+      confidencePct,
+      rawModelScore
+    };
+    analysis.aiCleanScore = aiCleanScore;
+    analysis.aiHazardIndex = aiHazardIndex;
+  }
+}
+
 function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
   const selectedBrand = selectedAnalysis.product.brand.toLowerCase();
   const selectedKey = analysisKey(selectedAnalysis);
   const selectedRiskCount = selectedAnalysis.risks.length;
   const selectedHormoneHits = selectedAnalysis.hormoneHits || 0;
   const selectedEnvironmentHits = selectedAnalysis.environmentHits || 0;
+  const selectedAiClean = selectedAnalysis.aiCleanScore || selectedAnalysis.cleanScore;
+  const selectedAiHazard = selectedAnalysis.aiHazardIndex || selectedAnalysis.hazardScore;
+  const selectedTokens = selectedAnalysis.profileTokens || new Set();
 
   const ranked = analyses
     .filter((analysis) => analysisKey(analysis) !== selectedKey)
     .filter((analysis) => categoryKey === "all" || categoryMatch(analysis.product, categoryKey))
     .map((analysis) => {
-      const cleanDelta = analysis.cleanScore - selectedAnalysis.cleanScore;
+      const candidateAiClean = analysis.aiCleanScore || analysis.cleanScore;
+      const candidateAiHazard = analysis.aiHazardIndex || analysis.hazardScore;
+      const aiCleanDelta = candidateAiClean - selectedAiClean;
+      const hazardReduction = selectedAiHazard - candidateAiHazard;
       const riskReduction = selectedRiskCount - analysis.risks.length;
       const hormoneReduction = selectedHormoneHits - (analysis.hormoneHits || 0);
       const environmentReduction = selectedEnvironmentHits - (analysis.environmentHits || 0);
       const differentBrand = analysis.product.brand.toLowerCase() !== selectedBrand;
+      const similarity = jaccardSimilarity(selectedTokens, analysis.profileTokens || new Set());
       const rankValue =
-        cleanDelta * 2.4 +
-        riskReduction * 1.8 +
-        hormoneReduction * 3.2 +
-        environmentReduction * 2.3 +
-        (analysis.bodyScore - selectedAnalysis.bodyScore) * 0.75 +
-        (analysis.ecoScore - selectedAnalysis.ecoScore) * 0.7 +
-        analysis.cleanScore * 0.12 +
+        aiCleanDelta * 3.1 +
+        hazardReduction * 0.26 +
+        riskReduction * 1.5 +
+        hormoneReduction * 3.9 +
+        environmentReduction * 2.9 +
+        (analysis.bodyScore - selectedAnalysis.bodyScore) * 0.72 +
+        (analysis.ecoScore - selectedAnalysis.ecoScore) * 0.78 +
+        similarity * 16 +
+        candidateAiClean * 0.07 +
         (differentBrand ? 2 : 0) +
         analysis.confidence * 0.05;
 
       return {
         analysis,
-        cleanDelta,
+        aiCleanDelta,
+        hazardReduction,
         riskReduction,
         hormoneReduction,
         environmentReduction,
+        similarity,
         differentBrand,
         rankValue
       };
@@ -642,10 +796,12 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
   const cleaner = ranked
     .filter(
       (entry) =>
-        entry.cleanDelta >= 3 ||
+        entry.aiCleanDelta >= 4 ||
+        entry.hazardReduction >= 8 ||
         entry.riskReduction >= 2 ||
         entry.hormoneReduction >= 1 ||
-        entry.environmentReduction >= 1
+        entry.environmentReduction >= 1 ||
+        (entry.similarity >= 0.08 && entry.aiCleanDelta >= 2)
     )
     .slice(0, 4);
   if (cleaner.length >= 3) return cleaner.slice(0, 3);
@@ -672,13 +828,15 @@ async function fetchBroaderAlternatives(selectedAnalysis, categoryKey) {
     .map(analyzeProduct);
 
   const deduped = uniqueAnalyses(analyses);
+  applyAiModel(deduped);
   state.alternativeCache[cacheKey] = deduped;
   return deduped;
 }
 
 function alternativeReason(selectedAnalysis, entry) {
   const reasons = [];
-  if (entry.cleanDelta >= 1) reasons.push(`clean score +${entry.cleanDelta}`);
+  if (entry.aiCleanDelta >= 1) reasons.push(`AI clean +${entry.aiCleanDelta}`);
+  if (entry.hazardReduction >= 1) reasons.push(`hazard index -${entry.hazardReduction}`);
   if (entry.hormoneReduction >= 1) reasons.push(`${entry.hormoneReduction} fewer endocrine flags`);
   if (entry.environmentReduction >= 1) reasons.push(`${entry.environmentReduction} fewer eco-risk flags`);
   if (entry.riskReduction >= 1) reasons.push(`${entry.riskReduction} fewer risk flag${entry.riskReduction > 1 ? "s" : ""}`);
@@ -713,14 +871,15 @@ async function renderAlternatives(selectedAnalysis, allAnalyses) {
 
   refs.alternativesGrid.innerHTML = alternatives
     .map((entry) => {
-      const { analysis, cleanDelta } = entry;
-      const badge = cleanDelta >= 1 ? `Cleaner +${cleanDelta}` : "Alternative";
+      const { analysis, aiCleanDelta } = entry;
+      const aiClean = analysis.aiCleanScore || analysis.cleanScore;
+      const badge = aiCleanDelta >= 1 ? `Cleaner +${aiCleanDelta}` : "Alternative";
       const reason = alternativeReason(selectedAnalysis, entry);
       return `
       <article class="alt-card">
         <h3>${escapeHtml(analysis.product.name)}</h3>
         <p>${escapeHtml(analysis.product.brand)}</p>
-        <span class="alt-badge">${badge} · Clean ${analysis.cleanScore}</span>
+        <span class="alt-badge">${badge} · AI Clean ${aiClean}</span>
         <p>${escapeHtml(reason)}</p>
         <p>${escapeHtml(buildOverview(analysis))}</p>
       </article>
@@ -742,7 +901,7 @@ function renderMatches(analyses, selectedId = null) {
       <button type="button" class="match-card ${entry.product.id === selectedId ? "active" : ""}" data-midx="${index}">
         <p class="match-name">${escapeHtml(entry.product.name)}</p>
         <p class="match-brand">${escapeHtml(entry.product.brand)}</p>
-        <span class="match-score">Score ${entry.overallScore}</span>
+        <span class="match-score">AI Clean ${entry.aiCleanScore || entry.cleanScore}</span>
       </button>
     `
     )
@@ -1042,6 +1201,7 @@ async function analyzeQuery(query, preferredProductName = "") {
     }
 
     const analyses = uniqueAnalyses(products.map(analyzeProduct));
+    applyAiModel(analyses);
 
     analyses.sort((a, b) => {
       const preferredBoostA = preferredProductName &&
@@ -1052,14 +1212,20 @@ async function analyzeQuery(query, preferredProductName = "") {
         b.product.name.toLowerCase().includes(preferredProductName.toLowerCase())
         ? 6
         : 0;
+      const aiCleanA = a.aiCleanScore || a.cleanScore;
+      const aiCleanB = b.aiCleanScore || b.cleanScore;
+      const aiHazardA = a.aiHazardIndex || a.hazardScore;
+      const aiHazardB = b.aiHazardIndex || b.hazardScore;
       const rankA =
         relevanceScore(a.product, query) * 1.05 +
-        a.cleanScore * 0.35 +
+        aiCleanA * 0.58 -
+        aiHazardA * 0.045 +
         a.confidence * 0.12 +
         preferredBoostA;
       const rankB =
         relevanceScore(b.product, query) * 1.05 +
-        b.cleanScore * 0.35 +
+        aiCleanB * 0.58 -
+        aiHazardB * 0.045 +
         b.confidence * 0.12 +
         preferredBoostB;
       return rankB - rankA;
