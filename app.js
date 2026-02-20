@@ -68,6 +68,36 @@ const RISK_INGREDIENTS = [
   { key: "acrylates copolymer", penalty: 8, note: "Acrylate polymers are tied to environmental persistence." }
 ];
 
+const ENDOCRINE_RISK_KEYS = [
+  "paraben",
+  "phthalate",
+  "triclosan",
+  "oxybenzone",
+  "octinoxate",
+  "bha",
+  "bht"
+];
+
+const ENVIRONMENT_RISK_KEYS = [
+  "polyethylene",
+  "polypropylene",
+  "nylon-12",
+  "acrylates copolymer",
+  "oxybenzone",
+  "octinoxate",
+  "triclosan"
+];
+
+const HIGH_IRRITANT_KEYS = [
+  "formaldehyde",
+  "dmdm hydantoin",
+  "quaternium-15",
+  "imidazolidinyl urea",
+  "diazolidinyl urea",
+  "sodium lauryl sulfate",
+  "sodium laureth sulfate"
+];
+
 const BENEFICIAL_INGREDIENTS = [
   "hyaluronic acid",
   "niacinamide",
@@ -348,7 +378,7 @@ function normalizeMakeupApiProduct(rawProduct) {
 }
 
 function ecoGradeToScore(grade) {
-  const map = { a: 94, b: 80, c: 65, d: 46, e: 28 };
+  const map = { a: 100, b: 82, c: 60, d: 36, e: 15 };
   return map[grade] || null;
 }
 
@@ -359,9 +389,13 @@ function ingredientMatch(text, key) {
   return text.includes(key);
 }
 
+function matchedRiskCount(risks, keys) {
+  return risks.filter((risk) => keys.some((key) => risk.key.includes(key))).length;
+}
+
 function analyzeProduct(product) {
-  let bodyScore = 88;
-  let ecoScore = 76;
+  let bodyScore = 96;
+  let ecoScore = 92;
   const risks = [];
   const positives = [];
 
@@ -369,18 +403,26 @@ function analyzeProduct(product) {
   for (const risk of RISK_INGREDIENTS) {
     if (ingredientMatch(text, risk.key)) {
       risks.push(risk);
-      bodyScore -= risk.penalty;
-      if (
-        risk.key === "polyethylene" ||
-        risk.key === "polypropylene" ||
-        risk.key === "nylon-12" ||
-        risk.key === "acrylates copolymer"
-      ) {
-        ecoScore -= 8;
+      let bodyPenalty = risk.penalty * 1.08;
+      let ecoPenalty = risk.penalty * 0.58;
+
+      if (ENDOCRINE_RISK_KEYS.some((key) => risk.key.includes(key))) {
+        bodyPenalty += 6;
+        ecoPenalty += 3;
       }
-      if (risk.key === "oxybenzone" || risk.key === "octinoxate" || risk.key === "triclosan") {
-        ecoScore -= 10;
+      if (ENVIRONMENT_RISK_KEYS.some((key) => risk.key.includes(key))) {
+        ecoPenalty += 8;
       }
+      if (HIGH_IRRITANT_KEYS.some((key) => risk.key.includes(key))) {
+        bodyPenalty += 4;
+      }
+      if (risk.key === "fragrance" || risk.key === "parfum") {
+        bodyPenalty += 2.5;
+        ecoPenalty += 1.2;
+      }
+
+      bodyScore -= bodyPenalty;
+      ecoScore -= ecoPenalty;
     }
   }
 
@@ -392,54 +434,77 @@ function analyzeProduct(product) {
     }
   }
 
-  bodyScore += Math.min(10, positives.length * 2);
+  bodyScore += Math.min(10, positives.length * 2.2);
+  ecoScore += Math.min(7, positives.length * 1.2);
 
   if (!product.ingredientsText) {
-    bodyScore -= 10;
+    bodyScore -= 22;
+    ecoScore -= 12;
+  } else if (product.ingredientsText.length < 20) {
+    bodyScore -= 8;
+    ecoScore -= 4;
   }
 
   const ecoFromGrade = ecoGradeToScore(product.ecoGrade);
   if (ecoFromGrade !== null) ecoScore = ecoFromGrade;
-  else ecoScore -= 8;
+  else ecoScore -= 16;
 
   if (product.cleanTagBoost) {
-    bodyScore += 3;
-    ecoScore += 5;
+    bodyScore += 2;
+    ecoScore += 7;
   }
 
   const packagingText = product.packaging.join(" ").toLowerCase();
-  if (packagingText.includes("plastic")) ecoScore -= 10;
-  if (packagingText.includes("glass")) ecoScore += 4;
-  if (packagingText.includes("recycled")) ecoScore += 8;
-  if (packagingText.includes("refill")) ecoScore += 8;
+  if (packagingText.includes("plastic")) ecoScore -= 16;
+  if (packagingText.includes("single-use")) ecoScore -= 8;
+  if (packagingText.includes("glass")) ecoScore += 2;
+  if (packagingText.includes("aluminum")) ecoScore += 6;
+  if (packagingText.includes("recycled")) ecoScore += 10;
+  if (packagingText.includes("refill")) ecoScore += 12;
 
   const labelText = product.labels.join(" ").toLowerCase();
   let labelBonus = 0;
   for (const label of ECO_LABEL_SIGNALS) {
-    if (labelText.includes(label)) labelBonus += 3;
+    if (labelText.includes(label)) labelBonus += 4;
   }
-  ecoScore += Math.min(12, labelBonus);
+  ecoScore += Math.min(20, labelBonus);
 
-  bodyScore = clamp(Math.round(bodyScore), 5, 98);
-  ecoScore = clamp(Math.round(ecoScore), 8, 98);
-  const overallScore = Math.round(bodyScore * 0.56 + ecoScore * 0.44);
+  const hormoneHits = matchedRiskCount(risks, ENDOCRINE_RISK_KEYS);
+  const environmentHits = matchedRiskCount(risks, ENVIRONMENT_RISK_KEYS);
+
+  bodyScore -= hormoneHits * 2.5;
+  ecoScore -= environmentHits * 2.4;
+
+  bodyScore = clamp(Math.round(bodyScore), 1, 99);
+  ecoScore = clamp(Math.round(ecoScore), 1, 99);
+  const overallScore = Math.round(bodyScore * 0.52 + ecoScore * 0.48);
   const cleanScore = clamp(
-    Math.round(bodyScore * 0.62 + ecoScore * 0.38 - risks.length * 1.2 + positives.length * 1.4),
-    5,
+    Math.round(
+      bodyScore * 0.56 +
+      ecoScore * 0.44 -
+      hormoneHits * 5 -
+      environmentHits * 2.8 -
+      risks.length * 1.6 +
+      positives.length * 1.4
+    ),
+    1,
     99
   );
 
-  let confidence = 30;
+  let confidence = 25;
   if (product.ingredientsText) confidence += 35;
   if (product.ecoGrade) confidence += 20;
   if (product.labels.length) confidence += 5;
   if (product.packaging.length) confidence += 5;
-  confidence = clamp(confidence, 20, 95);
+  if (product.source === "makeup_api" && !product.ingredientsText) confidence -= 8;
+  confidence = clamp(confidence, 15, 95);
 
   return {
     product,
     risks,
     positives,
+    hormoneHits,
+    environmentHits,
     bodyScore,
     ecoScore,
     overallScore,
@@ -539,6 +604,8 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
   const selectedBrand = selectedAnalysis.product.brand.toLowerCase();
   const selectedKey = analysisKey(selectedAnalysis);
   const selectedRiskCount = selectedAnalysis.risks.length;
+  const selectedHormoneHits = selectedAnalysis.hormoneHits || 0;
+  const selectedEnvironmentHits = selectedAnalysis.environmentHits || 0;
 
   const ranked = analyses
     .filter((analysis) => analysisKey(analysis) !== selectedKey)
@@ -546,20 +613,26 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
     .map((analysis) => {
       const cleanDelta = analysis.cleanScore - selectedAnalysis.cleanScore;
       const riskReduction = selectedRiskCount - analysis.risks.length;
+      const hormoneReduction = selectedHormoneHits - (analysis.hormoneHits || 0);
+      const environmentReduction = selectedEnvironmentHits - (analysis.environmentHits || 0);
       const differentBrand = analysis.product.brand.toLowerCase() !== selectedBrand;
       const rankValue =
-        cleanDelta * 1.8 +
-        riskReduction * 2.1 +
-        (analysis.bodyScore - selectedAnalysis.bodyScore) * 0.6 +
-        (analysis.ecoScore - selectedAnalysis.ecoScore) * 0.42 +
-        analysis.cleanScore * 0.18 +
-        (differentBrand ? 2.2 : 0) +
-        analysis.confidence * 0.04;
+        cleanDelta * 2.4 +
+        riskReduction * 1.8 +
+        hormoneReduction * 3.2 +
+        environmentReduction * 2.3 +
+        (analysis.bodyScore - selectedAnalysis.bodyScore) * 0.75 +
+        (analysis.ecoScore - selectedAnalysis.ecoScore) * 0.7 +
+        analysis.cleanScore * 0.12 +
+        (differentBrand ? 2 : 0) +
+        analysis.confidence * 0.05;
 
       return {
         analysis,
         cleanDelta,
         riskReduction,
+        hormoneReduction,
+        environmentReduction,
         differentBrand,
         rankValue
       };
@@ -567,7 +640,13 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
     .sort((a, b) => b.rankValue - a.rankValue);
 
   const cleaner = ranked
-    .filter((entry) => entry.cleanDelta >= 4 || entry.riskReduction >= 1)
+    .filter(
+      (entry) =>
+        entry.cleanDelta >= 3 ||
+        entry.riskReduction >= 2 ||
+        entry.hormoneReduction >= 1 ||
+        entry.environmentReduction >= 1
+    )
     .slice(0, 4);
   if (cleaner.length >= 3) return cleaner.slice(0, 3);
 
@@ -587,7 +666,7 @@ async function fetchBroaderAlternatives(selectedAnalysis, categoryKey) {
   }
 
   const query = ALT_SEARCH_TERMS[categoryKey] || ALT_SEARCH_TERMS.all;
-  const rows = await fetchProducts(query, 60, 2);
+  const rows = await fetchProducts(query, 60, 2, categoryKey);
   const analyses = rows
     .filter((product) => categoryKey === "all" || categoryMatch(product, categoryKey))
     .map(analyzeProduct);
@@ -600,11 +679,13 @@ async function fetchBroaderAlternatives(selectedAnalysis, categoryKey) {
 function alternativeReason(selectedAnalysis, entry) {
   const reasons = [];
   if (entry.cleanDelta >= 1) reasons.push(`clean score +${entry.cleanDelta}`);
+  if (entry.hormoneReduction >= 1) reasons.push(`${entry.hormoneReduction} fewer endocrine flags`);
+  if (entry.environmentReduction >= 1) reasons.push(`${entry.environmentReduction} fewer eco-risk flags`);
   if (entry.riskReduction >= 1) reasons.push(`${entry.riskReduction} fewer risk flag${entry.riskReduction > 1 ? "s" : ""}`);
   if (entry.analysis.bodyScore > selectedAnalysis.bodyScore) reasons.push(`better body profile`);
   if (entry.analysis.ecoScore > selectedAnalysis.ecoScore) reasons.push(`better eco profile`);
   if (entry.differentBrand) reasons.push("different brand option");
-  return reasons.slice(0, 2).join(" • ") || "similar profile alternative";
+  return reasons.slice(0, 3).join(" • ") || "similar profile alternative";
 }
 
 async function renderAlternatives(selectedAnalysis, allAnalyses) {
@@ -639,7 +720,7 @@ async function renderAlternatives(selectedAnalysis, allAnalyses) {
       <article class="alt-card">
         <h3>${escapeHtml(analysis.product.name)}</h3>
         <p>${escapeHtml(analysis.product.brand)}</p>
-        <span class="alt-badge">${badge} · Score ${analysis.overallScore}</span>
+        <span class="alt-badge">${badge} · Clean ${analysis.cleanScore}</span>
         <p>${escapeHtml(reason)}</p>
         <p>${escapeHtml(buildOverview(analysis))}</p>
       </article>
@@ -680,13 +761,38 @@ function renderSelectedAnalysis(analysis, allAnalyses) {
 function relevanceScore(product, query) {
   const q = query.trim().toLowerCase();
   if (!q) return 0;
-  const productName = product.name.toLowerCase();
-  const brandName = product.brand.toLowerCase();
+  const productName = (product.name || "").toLowerCase();
+  const brandName = (product.brand || "").toLowerCase();
+  const categories = (product.categories || "").toLowerCase();
+  const categoryTags = Array.isArray(product.categoriesTags)
+    ? product.categoriesTags.join(" ").toLowerCase()
+    : "";
+  const tokens = queryTokens(query);
+
   let points = 0;
-  if (productName === q) points += 8;
-  if (productName.includes(q)) points += 5;
-  if (brandName.includes(q)) points += 2;
-  points += Math.min(3, productName.split(" ").filter((w) => q.includes(w)).length);
+
+  if (productName === q) points += 24;
+  else if (productName.startsWith(q)) points += 18;
+  else if (productName.includes(q)) points += 12;
+
+  if (brandName === q) points += 18;
+  else if (brandName.startsWith(q)) points += 14;
+  else if (brandName.includes(q)) points += 9;
+
+  if (categories.includes(q) || categoryTags.includes(q)) points += 7;
+
+  let tokenHits = 0;
+  for (const token of tokens) {
+    if (productName.includes(token)) tokenHits += 1.8;
+    if (brandName.includes(token)) tokenHits += 1.5;
+    if (categories.includes(token) || categoryTags.includes(token)) tokenHits += 1.1;
+  }
+  points += tokenHits * 3.4;
+
+  if (state.activeCategory !== "all" && categoryMatch(product, state.activeCategory)) {
+    points += 4;
+  }
+
   return points;
 }
 
@@ -788,13 +894,28 @@ async function fetchMakeupProducts(query, category = "all") {
   const tokenList = queryTokens(query);
   const brandCandidate = tokenList.slice(0, 2).join(" ");
   const firstToken = tokenList[0] || "";
+  const secondToken = tokenList[1] || "";
   const categoryTypes = MAKEUP_TYPE_BY_CATEGORY[category] || [];
   const inferredTypes = inferMakeupTypesFromQuery(query);
   const types = [...new Set([...categoryTypes, ...inferredTypes])].slice(0, 4);
 
   const requests = [];
-  if (brandCandidate) requests.push(`${MAKEUP_API_BASE}?brand=${encodeURIComponent(brandCandidate)}`);
-  if (firstToken && firstToken !== brandCandidate) requests.push(`${MAKEUP_API_BASE}?brand=${encodeURIComponent(firstToken)}`);
+  const brandVariants = [
+    brandCandidate,
+    brandCandidate.replace(/\s+/g, "-"),
+    brandCandidate.replace(/\s+/g, ""),
+    firstToken,
+    secondToken,
+    tokenList.slice(0, 3).join(" ")
+  ]
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const seenBrandVariants = new Set();
+  for (const brand of brandVariants) {
+    if (seenBrandVariants.has(brand)) continue;
+    seenBrandVariants.add(brand);
+    requests.push(`${MAKEUP_API_BASE}?brand=${encodeURIComponent(brand)}`);
+  }
   for (const type of types) {
     requests.push(`${MAKEUP_API_BASE}?product_type=${encodeURIComponent(type)}`);
   }
@@ -842,10 +963,10 @@ function uniqueProducts(products) {
   return unique;
 }
 
-async function fetchProducts(query, pageSize = 40, pages = 2) {
+async function fetchProducts(query, pageSize = 40, pages = 2, category = state.activeCategory) {
   const [openBeautyResult, makeupResult] = await Promise.allSettled([
     fetchOpenBeautyProducts(query, pageSize, pages),
-    fetchMakeupProducts(query, state.activeCategory)
+    fetchMakeupProducts(query, category)
   ]);
 
   const openBeautyProducts = openBeautyResult.status === "fulfilled" ? openBeautyResult.value : [];
@@ -874,7 +995,8 @@ async function loadSuggestions(query) {
       }
     }
 
-    state.suggestionItems = unique.slice(0, 7);
+    unique.sort((a, b) => relevanceScore(b, query) - relevanceScore(a, query));
+    state.suggestionItems = unique.slice(0, 8);
 
     if (!state.suggestionItems.length) {
       refs.suggestions.classList.add("hidden");
@@ -930,8 +1052,16 @@ async function analyzeQuery(query, preferredProductName = "") {
         b.product.name.toLowerCase().includes(preferredProductName.toLowerCase())
         ? 6
         : 0;
-      const rankA = relevanceScore(a.product, query) + preferredBoostA + a.overallScore * 0.02;
-      const rankB = relevanceScore(b.product, query) + preferredBoostB + b.overallScore * 0.02;
+      const rankA =
+        relevanceScore(a.product, query) * 1.05 +
+        a.cleanScore * 0.35 +
+        a.confidence * 0.12 +
+        preferredBoostA;
+      const rankB =
+        relevanceScore(b.product, query) * 1.05 +
+        b.cleanScore * 0.35 +
+        b.confidence * 0.12 +
+        preferredBoostB;
       return rankB - rankA;
     });
 
