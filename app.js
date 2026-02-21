@@ -1,3 +1,7 @@
+const API_ROOT =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://127.0.0.1:8000"
+    : "";
 const API_BASE = "https://world.openbeautyfacts.org/cgi/search.pl";
 const MAKEUP_API_BASE = "https://makeup-api.herokuapp.com/api/v1/products.json";
 const CATEGORY_KEYWORDS = {
@@ -187,6 +191,7 @@ const state = {
   activeCategory: "all",
   suggestionItems: [],
   lastAnalyses: [],
+  alternativesById: {},
   selectedId: null,
   factType: "quick",
   lastFactText: "",
@@ -244,6 +249,26 @@ function randomItemExcluding(items, previous) {
 
 function setStatus(text) {
   refs.statusText.textContent = text;
+}
+
+function apiUrl(path, params = {}) {
+  const base = API_ROOT || "";
+  const url = new URL(path, `${base || window.location.origin}`);
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined) continue;
+    const asString = String(value).trim();
+    if (!asString.length) continue;
+    url.searchParams.set(key, asString);
+  }
+  return base ? url.href : `${url.pathname}${url.search}`;
+}
+
+async function apiGet(path, params = {}) {
+  const response = await fetch(apiUrl(path, params));
+  if (!response.ok) {
+    throw new Error(`API request failed: ${response.status}`);
+  }
+  return response.json();
 }
 
 function categoryTerms(category) {
@@ -1099,24 +1124,8 @@ function alternativeReason(selectedAnalysis, entry) {
   return reasons.slice(0, 3).join(" • ") || "similar profile alternative";
 }
 
-async function renderAlternatives(selectedAnalysis, allAnalyses) {
-  const requestId = ++state.alternativeRequestId;
-  refs.alternativesGrid.innerHTML = `<p class="empty-state">Scanning for cleaner alternatives...</p>`;
-
+function renderAlternatives(selectedAnalysis, alternatives = []) {
   const categoryKey = resolveAlternativeCategory(selectedAnalysis.product);
-  let ranked = rankAlternativeCandidates(selectedAnalysis, uniqueAnalyses(allAnalyses), categoryKey);
-
-  if (ranked.length < 3) {
-    try {
-      const broader = await fetchBroaderAlternatives(selectedAnalysis, categoryKey);
-      if (requestId !== state.alternativeRequestId) return;
-      ranked = rankAlternativeCandidates(selectedAnalysis, uniqueAnalyses([...allAnalyses, ...broader]), categoryKey);
-    } catch (error) {
-      if (requestId !== state.alternativeRequestId) return;
-    }
-  }
-
-  const alternatives = ranked.slice(0, 3);
   renderComparisonPanel(selectedAnalysis, alternatives, categoryKey);
   if (!alternatives.length) {
     refs.alternativesGrid.innerHTML = `<p class="empty-state">No alternatives were found yet. Try a broader product or category search.</p>`;
@@ -1170,10 +1179,11 @@ function renderMatches(analyses, selectedId = null) {
 
 function renderSelectedAnalysis(analysis, allAnalyses) {
   state.selectedId = analysis.product.id;
+  const alternatives = state.alternativesById[analysis.product.id] || [];
   renderProduct(analysis);
   renderScores(analysis);
   renderInsightLists(analysis);
-  renderAlternatives(analysis, allAnalyses);
+  renderAlternatives(analysis, alternatives);
   renderMatches(allAnalyses, analysis.product.id);
 }
 
@@ -1404,22 +1414,13 @@ async function loadSuggestions(query) {
   }
 
   try {
-    const rows = await fetchProducts(query, 20, 1);
-    const list = rows
-      .filter(matchesActiveCategory);
-
-    const unique = [];
-    const keySet = new Set();
-    for (const item of list) {
-      const key = `${item.name.toLowerCase()}::${item.brand.toLowerCase()}`;
-      if (!keySet.has(key)) {
-        keySet.add(key);
-        unique.push(item);
-      }
-    }
-
-    unique.sort((a, b) => relevanceScore(b, query) - relevanceScore(a, query));
-    state.suggestionItems = unique.slice(0, 8);
+    const payload = await apiGet("/api/suggest", {
+      query,
+      category: state.activeCategory,
+      limit: 8
+    });
+    const rows = Array.isArray(payload.items) ? payload.items : [];
+    state.suggestionItems = rows.slice(0, 8);
 
     if (!state.suggestionItems.length) {
       refs.suggestions.classList.add("hidden");
@@ -1454,54 +1455,58 @@ async function analyzeQuery(query, preferredProductName = "") {
   refs.suggestions.classList.add("hidden");
 
   try {
-    const rows = await fetchProducts(query, 60, 3);
-    const products = rows
-      .filter(matchesActiveCategory);
+    const payload = await apiGet("/api/analyze", {
+      query,
+      category: state.activeCategory,
+      preferred: preferredProductName
+    });
+    const analyses = Array.isArray(payload.analyses) ? payload.analyses : [];
+    const alternativesByIdRaw = payload.alternativesById && typeof payload.alternativesById === "object"
+      ? payload.alternativesById
+      : {};
 
-    if (!products.length) {
+    if (!analyses.length) {
       setStatus("No matching beauty products found. Try another spelling or wider term.");
       renderEmptyState("No matching beauty products found yet.");
       return;
     }
 
-    const analyses = uniqueAnalyses(products.map(analyzeProduct));
-    applyModelRanking(analyses);
-
-    analyses.sort((a, b) => {
-      const preferredBoostA = preferredProductName &&
-        a.product.name.toLowerCase().includes(preferredProductName.toLowerCase())
-        ? 6
-        : 0;
-      const preferredBoostB = preferredProductName &&
-        b.product.name.toLowerCase().includes(preferredProductName.toLowerCase())
-        ? 6
-        : 0;
-      const modelCleanA = a.modelCleanScore || a.cleanScore;
-      const modelCleanB = b.modelCleanScore || b.cleanScore;
-      const modelRiskA = a.modelRiskIndex || a.hazardScore;
-      const modelRiskB = b.modelRiskIndex || b.hazardScore;
-      const rankA =
-        relevanceScore(a.product, query) * 1.05 +
-        modelCleanA * 0.58 -
-        modelRiskA * 0.045 +
-        a.confidence * 0.12 +
-        preferredBoostA;
-      const rankB =
-        relevanceScore(b.product, query) * 1.05 +
-        modelCleanB * 0.58 -
-        modelRiskB * 0.045 +
-        b.confidence * 0.12 +
-        preferredBoostB;
-      return rankB - rankA;
-    });
-
     state.lastAnalyses = analyses;
-    const selected = analyses[0];
+    state.alternativesById = {};
+    const analysisById = new Map(analyses.map((item) => [item.product.id, item]));
+    for (const [selectedId, entries] of Object.entries(alternativesByIdRaw)) {
+      const parsed = Array.isArray(entries) ? entries : [];
+      state.alternativesById[selectedId] = parsed
+        .map((entry) => {
+          const altAnalysis = analysisById.get(entry.analysisId);
+          if (!altAnalysis) return null;
+          return {
+            analysis: altAnalysis,
+            cleanDelta: Number(entry.cleanDelta || 0),
+            riskIndexReduction: Number(entry.riskIndexReduction || 0),
+            riskReduction: Number(entry.riskReduction || 0),
+            hormoneReduction: Number(entry.hormoneReduction || 0),
+            environmentReduction: Number(entry.environmentReduction || 0),
+            irritantReduction: Number(entry.irritantReduction || 0),
+            differentBrand: Boolean(entry.differentBrand),
+            similarity: Number(entry.similarity || 0),
+            identitySimilarity: Number(entry.identitySimilarity || 0),
+            rankValue: Number(entry.rankValue || 0)
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 3);
+    }
+
+    const selectedId = payload.selectedId || analyses[0].product.id;
+    const selected = analysisById.get(selectedId) || analyses[0];
     renderSelectedAnalysis(selected, analyses);
     renderFunFact(state.factType);
-    const makeupCount = products.filter((product) => product.source === "makeup_api").length;
-    const obfCount = products.length - makeupCount;
-    setStatus(`Analyzed ${products.length} products (${obfCount} Open Beauty Facts + ${makeupCount} Makeup API).`);
+    if (payload.statusText) {
+      setStatus(payload.statusText);
+    } else {
+      setStatus(`Analyzed ${analyses.length} products.`);
+    }
   } catch (error) {
     setStatus("Could not load product data right now. Please retry in a moment.");
     renderEmptyState("Could not load product data right now.");
@@ -1511,6 +1516,7 @@ async function analyzeQuery(query, preferredProductName = "") {
 function setActiveCategory(category) {
   state.activeCategory = category;
   state.alternativeCache = {};
+  state.alternativesById = {};
   const buttons = Array.from(refs.categoryRow.querySelectorAll(".category-pill"));
   for (const button of buttons) {
     const active = button.dataset.category === category;
