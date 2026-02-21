@@ -4,14 +4,40 @@ const CATEGORY_KEYWORDS = {
   all: [],
   fragrances: ["perfume", "fragrance", "deodorant", "cologne", "eau de", "body mist", "parfum"],
   "lip-care": ["lip", "lipstick", "lip balm", "lip gloss", "lip care", "lipliner", "lipstick"],
-  "skin-care": ["cream", "cleanser", "serum", "moisturizer", "lotion", "body wash", "face wash", "mask", "toner"],
+  "skin-care": [
+    "cream",
+    "cleanser",
+    "serum",
+    "moisturizer",
+    "lotion",
+    "body wash",
+    "face wash",
+    "mask",
+    "toner",
+    "sunscreen",
+    "sun screen",
+    "sunblock",
+    "spf"
+  ],
   "eye-makeup": ["eyeliner", "mascara", "eyeshadow", "eye shadow", "brow", "kajal", "eye pencil"]
 };
 
 const CATEGORY_TAG_HINTS = {
   fragrances: ["perfume", "fragrance", "deodorant", "cologne", "parfum"],
   "lip-care": ["lip", "lipstick", "lip-balm", "lip-gloss", "lip-care"],
-  "skin-care": ["skin-care", "body-wash", "cleanser", "moisturizer", "serum", "lotion", "face-wash", "cream"],
+  "skin-care": [
+    "skin-care",
+    "body-wash",
+    "cleanser",
+    "moisturizer",
+    "serum",
+    "lotion",
+    "face-wash",
+    "cream",
+    "sunscreen",
+    "sun-protection",
+    "spf"
+  ],
   "eye-makeup": ["eye-makeup", "eyeliner", "mascara", "eyeshadow", "kajal", "brow"]
 };
 
@@ -19,7 +45,7 @@ const ALT_SEARCH_TERMS = {
   all: "beauty makeup lipstick skincare fragrance clean",
   fragrances: "perfume fragrance eau de parfum body mist deodorant",
   "lip-care": "lip balm lipstick lip gloss lip tint",
-  "skin-care": "skin care cleanser moisturizer serum body wash",
+  "skin-care": "skin care cleanser moisturizer serum body wash sunscreen spf",
   "eye-makeup": "eyeliner mascara kajal eyeshadow brow pencil"
 };
 
@@ -344,6 +370,30 @@ function primaryCategoryKey(product) {
   return "all";
 }
 
+function categoryFromText(text) {
+  const probe = {
+    name: String(text || ""),
+    categories: "",
+    categoriesTags: []
+  };
+  const order = ["fragrances", "lip-care", "skin-care", "eye-makeup"];
+  for (const key of order) {
+    if (categoryMatch(probe, key)) return key;
+  }
+  return "all";
+}
+
+function resolveAlternativeCategory(product) {
+  const fromProduct = primaryCategoryKey(product);
+  if (fromProduct !== "all") return fromProduct;
+
+  const fromQuery = categoryFromText(refs.input?.value || "");
+  if (fromQuery !== "all") return fromQuery;
+
+  if (state.activeCategory !== "all") return state.activeCategory;
+  return "all";
+}
+
 function matchesActiveCategory(product) {
   return categoryMatch(product, state.activeCategory);
 }
@@ -626,6 +676,7 @@ function analyzeProduct(product) {
   const ingredientTokenCount = tokenSet(product.ingredientsText).size;
   const positiveDensity = ingredientTokenCount ? positives.length / ingredientTokenCount : 0;
   const profileTokens = tokenSet(`${product.name} ${product.brand} ${product.categories} ${product.ingredientsText}`);
+  const identityTokens = tokenSet(`${product.name} ${product.categories}`);
 
   return {
     product,
@@ -640,6 +691,7 @@ function analyzeProduct(product) {
     hazardScore,
     positiveDensity,
     profileTokens,
+    identityTokens,
     bodyScore,
     ecoScore,
     overallScore,
@@ -933,6 +985,7 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
   const selectedModelClean = selectedAnalysis.modelCleanScore || selectedAnalysis.cleanScore;
   const selectedModelRisk = selectedAnalysis.modelRiskIndex || selectedAnalysis.hazardScore;
   const selectedTokens = selectedAnalysis.profileTokens || new Set();
+  const selectedIdentityTokens = selectedAnalysis.identityTokens || tokenSet(selectedAnalysis.product.name);
 
   const ranked = analyses
     .filter((analysis) => analysisKey(analysis) !== selectedKey)
@@ -947,6 +1000,7 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
       const environmentReduction = selectedEnvironmentHits - (analysis.environmentHits || 0);
       const differentBrand = analysis.product.brand.toLowerCase() !== selectedBrand;
       const similarity = jaccardSimilarity(selectedTokens, analysis.profileTokens || new Set());
+      const identitySimilarity = jaccardSimilarity(selectedIdentityTokens, analysis.identityTokens || new Set());
       const rankValue =
         cleanDelta * 3.1 +
         riskIndexReduction * 0.26 +
@@ -955,7 +1009,8 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
         environmentReduction * 2.9 +
         (analysis.bodyScore - selectedAnalysis.bodyScore) * 0.72 +
         (analysis.ecoScore - selectedAnalysis.ecoScore) * 0.78 +
-        similarity * 16 +
+        similarity * 10 +
+        identitySimilarity * 26 +
         candidateModelClean * 0.07 +
         (differentBrand ? 2 : 0) +
         analysis.confidence * 0.05;
@@ -968,13 +1023,15 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
         hormoneReduction,
         environmentReduction,
         similarity,
+        identitySimilarity,
         differentBrand,
         rankValue
       };
     })
     .sort((a, b) => b.rankValue - a.rankValue);
 
-  const cleaner = ranked
+  const compatibleRanked = ranked.filter((entry) => categoryKey !== "all" || entry.identitySimilarity >= 0.12);
+  const cleaner = compatibleRanked
     .filter(
       (entry) =>
         entry.cleanDelta >= 4 ||
@@ -982,13 +1039,13 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
         entry.riskReduction >= 2 ||
         entry.hormoneReduction >= 1 ||
         entry.environmentReduction >= 1 ||
-        (entry.similarity >= 0.08 && entry.cleanDelta >= 2)
+        (entry.identitySimilarity >= 0.1 && entry.cleanDelta >= 2)
     )
     .slice(0, 4);
   if (cleaner.length >= 3) return cleaner.slice(0, 3);
 
   const picked = [...cleaner];
-  for (const entry of ranked) {
+  for (const entry of compatibleRanked) {
     if (picked.some((p) => analysisKey(p.analysis) === analysisKey(entry.analysis))) continue;
     picked.push(entry);
     if (picked.length === 3) break;
@@ -1031,7 +1088,7 @@ async function renderAlternatives(selectedAnalysis, allAnalyses) {
   const requestId = ++state.alternativeRequestId;
   refs.alternativesGrid.innerHTML = `<p class="empty-state">Scanning for cleaner alternatives...</p>`;
 
-  const categoryKey = primaryCategoryKey(selectedAnalysis.product);
+  const categoryKey = resolveAlternativeCategory(selectedAnalysis.product);
   let ranked = rankAlternativeCandidates(selectedAnalysis, uniqueAnalyses(allAnalyses), categoryKey);
 
   if (ranked.length < 3) {
