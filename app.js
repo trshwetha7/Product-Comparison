@@ -982,6 +982,7 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
   const selectedRiskCount = selectedAnalysis.risks.length;
   const selectedHormoneHits = selectedAnalysis.hormoneHits || 0;
   const selectedEnvironmentHits = selectedAnalysis.environmentHits || 0;
+  const selectedIrritantHits = selectedAnalysis.irritantHits || 0;
   const selectedModelClean = selectedAnalysis.modelCleanScore || selectedAnalysis.cleanScore;
   const selectedModelRisk = selectedAnalysis.modelRiskIndex || selectedAnalysis.hazardScore;
   const selectedTokens = selectedAnalysis.profileTokens || new Set();
@@ -998,6 +999,12 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
       const riskReduction = selectedRiskCount - analysis.risks.length;
       const hormoneReduction = selectedHormoneHits - (analysis.hormoneHits || 0);
       const environmentReduction = selectedEnvironmentHits - (analysis.environmentHits || 0);
+      const irritantReduction = selectedIrritantHits - (analysis.irritantHits || 0);
+      const noNewRiskFlags =
+        analysis.risks.length <= selectedRiskCount &&
+        (analysis.hormoneHits || 0) <= selectedHormoneHits &&
+        (analysis.environmentHits || 0) <= selectedEnvironmentHits &&
+        (analysis.irritantHits || 0) <= selectedIrritantHits;
       const differentBrand = analysis.product.brand.toLowerCase() !== selectedBrand;
       const similarity = jaccardSimilarity(selectedTokens, analysis.profileTokens || new Set());
       const identitySimilarity = jaccardSimilarity(selectedIdentityTokens, analysis.identityTokens || new Set());
@@ -1007,12 +1014,14 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
         riskReduction * 1.5 +
         hormoneReduction * 3.9 +
         environmentReduction * 2.9 +
+        irritantReduction * 3.2 +
         (analysis.bodyScore - selectedAnalysis.bodyScore) * 0.72 +
         (analysis.ecoScore - selectedAnalysis.ecoScore) * 0.78 +
         similarity * 10 +
         identitySimilarity * 26 +
         candidateModelClean * 0.07 +
         (differentBrand ? 2 : 0) +
+        (noNewRiskFlags ? 3.5 : -6.5) +
         analysis.confidence * 0.05;
 
       return {
@@ -1022,6 +1031,8 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
         riskReduction,
         hormoneReduction,
         environmentReduction,
+        irritantReduction,
+        noNewRiskFlags,
         similarity,
         identitySimilarity,
         differentBrand,
@@ -1031,21 +1042,25 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
     .sort((a, b) => b.rankValue - a.rankValue);
 
   const compatibleRanked = ranked.filter((entry) => categoryKey !== "all" || entry.identitySimilarity >= 0.12);
-  const cleaner = compatibleRanked
+  const saferRanked = compatibleRanked.filter(
+    (entry) => entry.noNewRiskFlags && entry.riskIndexReduction >= 0 && entry.cleanDelta >= 0
+  );
+  const cleaner = saferRanked
     .filter(
       (entry) =>
-        entry.cleanDelta >= 4 ||
-        entry.riskIndexReduction >= 8 ||
-        entry.riskReduction >= 2 ||
+        entry.cleanDelta >= 3 ||
+        entry.riskIndexReduction >= 4 ||
+        entry.riskReduction >= 1 ||
         entry.hormoneReduction >= 1 ||
         entry.environmentReduction >= 1 ||
-        (entry.identitySimilarity >= 0.1 && entry.cleanDelta >= 2)
+        entry.irritantReduction >= 1 ||
+        (entry.identitySimilarity >= 0.1 && entry.cleanDelta >= 1)
     )
     .slice(0, 4);
   if (cleaner.length >= 3) return cleaner.slice(0, 3);
 
   const picked = [...cleaner];
-  for (const entry of compatibleRanked) {
+  for (const entry of saferRanked) {
     if (picked.some((p) => analysisKey(p.analysis) === analysisKey(entry.analysis))) continue;
     picked.push(entry);
     if (picked.length === 3) break;
