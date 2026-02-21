@@ -464,6 +464,20 @@ h3 {
   padding: 0.75rem;
 }
 
+.alt-image {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 0.8rem;
+  background: #fff2f8;
+  border: 1px solid rgba(147, 79, 116, 0.11);
+  margin-bottom: 0.5rem;
+}
+
+.alt-image-placeholder {
+  background: linear-gradient(145deg, #fff5fa, #f6fff8);
+}
+
 .alt-card h3 {
   margin: 0;
   font-size: 0.92rem;
@@ -488,6 +502,57 @@ h3 {
   margin: -0.15rem 0 0.8rem;
   font-size: 0.84rem;
   color: #7c6675;
+}
+
+.compare-panel {
+  margin-bottom: 0.95rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(147, 79, 116, 0.14);
+  border-radius: 0.9rem;
+  background: linear-gradient(145deg, #fff9fc, #f8fff9);
+}
+
+.compare-panel h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.look-list {
+  margin: 0;
+  padding-left: 1.05rem;
+}
+
+.look-list li {
+  margin-bottom: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.summary-block {
+  margin-top: 0.8rem;
+}
+
+.summary-table-wrap {
+  overflow-x: auto;
+}
+
+.summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.summary-table th,
+.summary-table td {
+  border-bottom: 1px solid rgba(147, 79, 116, 0.16);
+  padding: 0.44rem 0.3rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.summary-table th {
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  color: #6d5564;
 }
 
 .fact-buttons {

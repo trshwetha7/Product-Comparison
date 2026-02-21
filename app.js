@@ -98,7 +98,7 @@ const HIGH_IRRITANT_KEYS = [
   "sodium laureth sulfate"
 ];
 
-const AI_MODEL_WEIGHTS = {
+const MODEL_WEIGHTS = {
   bodyPct: 1.35,
   ecoPct: 1.2,
   cleanPct: 1.45,
@@ -180,6 +180,11 @@ const refs = {
   riskList: document.getElementById("riskList"),
   goodList: document.getElementById("goodList"),
   alternativesGrid: document.getElementById("alternativesGrid"),
+  comparePanel: document.getElementById("comparePanel"),
+  lookForTitle: document.getElementById("lookForTitle"),
+  lookForList: document.getElementById("lookForList"),
+  summaryTitle: document.getElementById("summaryTitle"),
+  summaryRows: document.getElementById("summaryRows"),
   funFact: document.getElementById("funFact"),
   factButtons: document.getElementById("factButtons")
 };
@@ -279,6 +284,56 @@ function categoryLabel(product) {
   if (categoryMatch(product, "eye-makeup")) return "Eye Makeup";
   if (categoryMatch(product, "skin-care")) return "Skin Care";
   return "Beauty";
+}
+
+function categoryGuidance(categoryKey) {
+  const byCategory = {
+    fragrances: {
+      title: "What to Look for in Cleaner Fragrances",
+      lookFor: [
+        "Fragrance transparency and fewer undisclosed blends",
+        "Phthalate-free formulas and lower allergen load",
+        "Refillable bottles or recycled packaging"
+      ]
+    },
+    "lip-care": {
+      title: "What to Look for in Cleaner, Healthier Lip Balms",
+      lookFor: [
+        "Plant-derived waxes and nourishing oils/butters",
+        "Lower fragrance load if lips are sensitive",
+        "Vegan/refillable/plastic-reduced packaging",
+        "Fewer endocrine-risk preservatives and additives"
+      ]
+    },
+    "skin-care": {
+      title: "What to Look for in Cleaner Skincare",
+      lookFor: [
+        "Barrier-supporting ingredients like glycerin and ceramides",
+        "Lower irritation risk and fewer harsh surfactants",
+        "Fragrance-minimized options for sensitive skin",
+        "Refill/recycled packaging with clear labels"
+      ]
+    },
+    "eye-makeup": {
+      title: "What to Look for in Cleaner Eye Makeup",
+      lookFor: [
+        "Lower-irritant formulas for eye-area sensitivity",
+        "Fewer synthetic fragrance additives",
+        "Avoidance of known endocrine-risk preservatives",
+        "More sustainable packaging and clear ingredient disclosure"
+      ]
+    },
+    all: {
+      title: "What to Look for in Cleaner Products",
+      lookFor: [
+        "Lower endocrine-risk and irritation-risk ingredients",
+        "Transparent ingredient labels and fewer hidden blends",
+        "Refill/recycled packaging and lower plastic footprint",
+        "Higher nourishing-ingredient density"
+      ]
+    }
+  };
+  return byCategory[categoryKey] || byCategory.all;
 }
 
 function primaryCategoryKey(product) {
@@ -608,9 +663,9 @@ function buildOverview(analysis) {
     : "No major watch-out ingredients were flagged from available data.";
 
   const sourceText = product.source === "makeup_api" ? "Makeup API" : "Open Beauty Facts";
-  const aiClean = analysis.aiCleanScore || analysis.cleanScore;
-  const aiHazard = analysis.aiHazardIndex || analysis.hazardScore;
-  return `${product.name} (${product.brand}) scores ${overallScore}/100 (${tone}), AI Clean ${aiClean}/100 and Hazard ${aiHazard}. ${riskSummary} Confidence: ${confidence}% from ingredient + label data (${sourceText}).`;
+  const cleanScore = analysis.cleanScore;
+  const hazard = analysis.hazardScore;
+  return `${product.name} (${product.brand}) scores ${overallScore}/100 (${tone}), with Clean Score ${cleanScore}/100 and risk index ${hazard}. ${riskSummary} Confidence: ${confidence}% from ingredient + label data (${sourceText}).`;
 }
 
 function renderProduct(analysis) {
@@ -653,10 +708,10 @@ function scoreCardHtml(label, value, caption, color) {
 }
 
 function renderScores(analysis) {
-  const aiClean = analysis.aiCleanScore || analysis.cleanScore;
-  const hazardIndex = analysis.aiHazardIndex || analysis.hazardScore;
+  const cleanScore = analysis.cleanScore;
+  const hazardIndex = analysis.hazardScore;
   refs.scoreGrid.innerHTML = `
-    ${scoreCardHtml("AI Clean", aiClean, `Hazard ${hazardIndex}`, "#ff98bb")}
+    ${scoreCardHtml("Clean Score", cleanScore, `Risk ${hazardIndex}`, "#ff98bb")}
     ${scoreCardHtml("Body Friendly", analysis.bodyScore, "Hormone + skin signal", "#ffbe9a")}
     ${scoreCardHtml("Eco Friendly", analysis.ecoScore, "Packaging + formula signal", "#6fc39a")}
   `;
@@ -684,7 +739,133 @@ function renderInsightLists(analysis) {
   }
 }
 
-function applyAiModel(analyses) {
+function mean(values) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function featureLabelFromScore(score) {
+  if (score >= 80) return "Excellent";
+  if (score >= 68) return "Good";
+  if (score >= 52) return "Moderate";
+  return "Needs caution";
+}
+
+function endocrineLabel(hits) {
+  if (hits <= 0) return "Low concern";
+  if (hits === 1) return "Moderate concern";
+  return "Higher concern";
+}
+
+function ecoPackagingLabel(analysis) {
+  const text = analysis.product.packaging.join(" ").toLowerCase();
+  if (text.includes("refill") || text.includes("recycled")) return "Refill/recycled positive";
+  if (text.includes("plastic")) return "Plastic-heavy";
+  if (analysis.ecoScore >= 72) return "Generally better";
+  return "Mixed";
+}
+
+function moistureSealLabel(analysis) {
+  const text = analysis.product.searchableIngredients;
+  const occlusives = ["petrolatum", "mineral oil", "beeswax", "cera alba", "dimethicone", "lanolin", "castor oil"];
+  const hit = occlusives.some((key) => text.includes(key));
+  return hit ? "Good" : "Limited";
+}
+
+function nourishingLabel(analysis) {
+  if (analysis.positives.length >= 2) return "Better";
+  if (analysis.positives.length === 1) return "Moderate";
+  return "Limited";
+}
+
+function bodyFriendlyLabel(analysis) {
+  if (analysis.hormoneHits + analysis.irritantHits === 0 && analysis.bodyScore >= 70) return "Minimal irritants";
+  if (analysis.bodyScore >= 58) return "Moderate concern";
+  return "Higher concern";
+}
+
+function renderComparisonPanel(selectedAnalysis, alternativeEntries, categoryKey) {
+  const guidance = categoryGuidance(categoryKey);
+  refs.lookForTitle.textContent = guidance.title;
+  refs.lookForList.innerHTML = guidance.lookFor.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+
+  refs.summaryTitle.textContent = `Summary: ${selectedAnalysis.product.name} vs Cleaner Options`;
+  const alternatives = alternativeEntries.map((entry) => entry.analysis);
+
+  if (!alternatives.length) {
+    refs.summaryRows.innerHTML = `
+      <tr>
+        <td>Availability</td>
+        <td>${escapeHtml(selectedAnalysis.product.name)}</td>
+        <td>No strong cleaner alternatives found yet in current data</td>
+      </tr>
+    `;
+    return;
+  }
+
+  const altBody = mean(alternatives.map((alt) => alt.bodyScore));
+  const altEco = mean(alternatives.map((alt) => alt.ecoScore));
+  const altClean = mean(alternatives.map((alt) => alt.cleanScore));
+  const altHormone = mean(alternatives.map((alt) => alt.hormoneHits));
+  const altRisks = mean(alternatives.map((alt) => alt.risks.length));
+
+  const rows = [
+    {
+      feature: "Moisture Seal",
+      selected: moistureSealLabel(selectedAnalysis),
+      cleaner: moistureSealLabel(alternatives[0])
+    },
+    {
+      feature: "Nourishing",
+      selected: nourishingLabel(selectedAnalysis),
+      cleaner: nourishingLabel(alternatives[0])
+    },
+    {
+      feature: "Body-friendly",
+      selected: bodyFriendlyLabel(selectedAnalysis),
+      cleaner: featureLabelFromScore(Math.round(altBody))
+    },
+    {
+      feature: "Eco / Sustainable",
+      selected: ecoPackagingLabel(selectedAnalysis),
+      cleaner: ecoPackagingLabel(alternatives[0])
+    },
+    {
+      feature: "Endocrine-risk signal",
+      selected: endocrineLabel(selectedAnalysis.hormoneHits),
+      cleaner: endocrineLabel(Math.round(altHormone))
+    },
+    {
+      feature: "Clean Score",
+      selected: `${selectedAnalysis.cleanScore}/100`,
+      cleaner: `~${Math.round(altClean)}/100`
+    },
+    {
+      feature: "Risk flags",
+      selected: `${selectedAnalysis.risks.length} flagged`,
+      cleaner: `~${Math.round(altRisks)} flagged`
+    },
+    {
+      feature: "Eco Score",
+      selected: `${selectedAnalysis.ecoScore}/100`,
+      cleaner: `~${Math.round(altEco)}/100`
+    }
+  ];
+
+  refs.summaryRows.innerHTML = rows
+    .map(
+      (row) => `
+      <tr>
+        <td>${escapeHtml(row.feature)}</td>
+        <td>${escapeHtml(row.selected)}</td>
+        <td>${escapeHtml(row.cleaner)}</td>
+      </tr>
+    `
+    )
+    .join("");
+}
+
+function applyModelRanking(analyses) {
   if (!analyses.length) return;
 
   const bodyValues = analyses.map((analysis) => analysis.bodyScore);
@@ -709,24 +890,24 @@ function applyAiModel(analyses) {
     const confidencePct = percentile(confidenceValues, analysis.confidence);
 
     const rawModelScore =
-      bodyPct * AI_MODEL_WEIGHTS.bodyPct +
-      ecoPct * AI_MODEL_WEIGHTS.ecoPct +
-      cleanPct * AI_MODEL_WEIGHTS.cleanPct +
-      hazardPct * AI_MODEL_WEIGHTS.hazardPct +
-      endocrinePct * AI_MODEL_WEIGHTS.endocrinePct +
-      ecoRiskPct * AI_MODEL_WEIGHTS.ecoRiskPct +
-      irritantPct * AI_MODEL_WEIGHTS.irritantPct +
-      positivePct * AI_MODEL_WEIGHTS.positivePct +
-      confidencePct * AI_MODEL_WEIGHTS.confidencePct;
+      bodyPct * MODEL_WEIGHTS.bodyPct +
+      ecoPct * MODEL_WEIGHTS.ecoPct +
+      cleanPct * MODEL_WEIGHTS.cleanPct +
+      hazardPct * MODEL_WEIGHTS.hazardPct +
+      endocrinePct * MODEL_WEIGHTS.endocrinePct +
+      ecoRiskPct * MODEL_WEIGHTS.ecoRiskPct +
+      irritantPct * MODEL_WEIGHTS.irritantPct +
+      positivePct * MODEL_WEIGHTS.positivePct +
+      confidencePct * MODEL_WEIGHTS.confidencePct;
 
-    const aiCleanScore = clamp(Math.round(sigmoid(rawModelScore * 2.25 - 2.2) * 100), 1, 99);
-    const aiHazardIndex = clamp(
+    const modelCleanScore = clamp(Math.round(sigmoid(rawModelScore * 2.25 - 2.2) * 100), 1, 99);
+    const modelRiskIndex = clamp(
       Math.round(analysis.hazardScore * 0.7 + hazardPct * 38 + endocrinePct * 20 + ecoRiskPct * 16),
       0,
       180
     );
 
-    analysis.ai = {
+    analysis.modelSignals = {
       bodyPct,
       ecoPct,
       cleanPct,
@@ -738,8 +919,8 @@ function applyAiModel(analyses) {
       confidencePct,
       rawModelScore
     };
-    analysis.aiCleanScore = aiCleanScore;
-    analysis.aiHazardIndex = aiHazardIndex;
+    analysis.modelCleanScore = modelCleanScore;
+    analysis.modelRiskIndex = modelRiskIndex;
   }
 }
 
@@ -749,40 +930,40 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
   const selectedRiskCount = selectedAnalysis.risks.length;
   const selectedHormoneHits = selectedAnalysis.hormoneHits || 0;
   const selectedEnvironmentHits = selectedAnalysis.environmentHits || 0;
-  const selectedAiClean = selectedAnalysis.aiCleanScore || selectedAnalysis.cleanScore;
-  const selectedAiHazard = selectedAnalysis.aiHazardIndex || selectedAnalysis.hazardScore;
+  const selectedModelClean = selectedAnalysis.modelCleanScore || selectedAnalysis.cleanScore;
+  const selectedModelRisk = selectedAnalysis.modelRiskIndex || selectedAnalysis.hazardScore;
   const selectedTokens = selectedAnalysis.profileTokens || new Set();
 
   const ranked = analyses
     .filter((analysis) => analysisKey(analysis) !== selectedKey)
     .filter((analysis) => categoryKey === "all" || categoryMatch(analysis.product, categoryKey))
     .map((analysis) => {
-      const candidateAiClean = analysis.aiCleanScore || analysis.cleanScore;
-      const candidateAiHazard = analysis.aiHazardIndex || analysis.hazardScore;
-      const aiCleanDelta = candidateAiClean - selectedAiClean;
-      const hazardReduction = selectedAiHazard - candidateAiHazard;
+      const candidateModelClean = analysis.modelCleanScore || analysis.cleanScore;
+      const candidateModelRisk = analysis.modelRiskIndex || analysis.hazardScore;
+      const cleanDelta = candidateModelClean - selectedModelClean;
+      const riskIndexReduction = selectedModelRisk - candidateModelRisk;
       const riskReduction = selectedRiskCount - analysis.risks.length;
       const hormoneReduction = selectedHormoneHits - (analysis.hormoneHits || 0);
       const environmentReduction = selectedEnvironmentHits - (analysis.environmentHits || 0);
       const differentBrand = analysis.product.brand.toLowerCase() !== selectedBrand;
       const similarity = jaccardSimilarity(selectedTokens, analysis.profileTokens || new Set());
       const rankValue =
-        aiCleanDelta * 3.1 +
-        hazardReduction * 0.26 +
+        cleanDelta * 3.1 +
+        riskIndexReduction * 0.26 +
         riskReduction * 1.5 +
         hormoneReduction * 3.9 +
         environmentReduction * 2.9 +
         (analysis.bodyScore - selectedAnalysis.bodyScore) * 0.72 +
         (analysis.ecoScore - selectedAnalysis.ecoScore) * 0.78 +
         similarity * 16 +
-        candidateAiClean * 0.07 +
+        candidateModelClean * 0.07 +
         (differentBrand ? 2 : 0) +
         analysis.confidence * 0.05;
 
       return {
         analysis,
-        aiCleanDelta,
-        hazardReduction,
+        cleanDelta,
+        riskIndexReduction,
         riskReduction,
         hormoneReduction,
         environmentReduction,
@@ -796,12 +977,12 @@ function rankAlternativeCandidates(selectedAnalysis, analyses, categoryKey) {
   const cleaner = ranked
     .filter(
       (entry) =>
-        entry.aiCleanDelta >= 4 ||
-        entry.hazardReduction >= 8 ||
+        entry.cleanDelta >= 4 ||
+        entry.riskIndexReduction >= 8 ||
         entry.riskReduction >= 2 ||
         entry.hormoneReduction >= 1 ||
         entry.environmentReduction >= 1 ||
-        (entry.similarity >= 0.08 && entry.aiCleanDelta >= 2)
+        (entry.similarity >= 0.08 && entry.cleanDelta >= 2)
     )
     .slice(0, 4);
   if (cleaner.length >= 3) return cleaner.slice(0, 3);
@@ -828,15 +1009,15 @@ async function fetchBroaderAlternatives(selectedAnalysis, categoryKey) {
     .map(analyzeProduct);
 
   const deduped = uniqueAnalyses(analyses);
-  applyAiModel(deduped);
+  applyModelRanking(deduped);
   state.alternativeCache[cacheKey] = deduped;
   return deduped;
 }
 
 function alternativeReason(selectedAnalysis, entry) {
   const reasons = [];
-  if (entry.aiCleanDelta >= 1) reasons.push(`AI clean +${entry.aiCleanDelta}`);
-  if (entry.hazardReduction >= 1) reasons.push(`hazard index -${entry.hazardReduction}`);
+  if (entry.cleanDelta >= 1) reasons.push(`clean score +${entry.cleanDelta}`);
+  if (entry.riskIndexReduction >= 1) reasons.push(`hazard index -${entry.riskIndexReduction}`);
   if (entry.hormoneReduction >= 1) reasons.push(`${entry.hormoneReduction} fewer endocrine flags`);
   if (entry.environmentReduction >= 1) reasons.push(`${entry.environmentReduction} fewer eco-risk flags`);
   if (entry.riskReduction >= 1) reasons.push(`${entry.riskReduction} fewer risk flag${entry.riskReduction > 1 ? "s" : ""}`);
@@ -864,6 +1045,7 @@ async function renderAlternatives(selectedAnalysis, allAnalyses) {
   }
 
   const alternatives = ranked.slice(0, 3);
+  renderComparisonPanel(selectedAnalysis, alternatives, categoryKey);
   if (!alternatives.length) {
     refs.alternativesGrid.innerHTML = `<p class="empty-state">No alternatives were found yet. Try a broader product or category search.</p>`;
     return;
@@ -871,15 +1053,21 @@ async function renderAlternatives(selectedAnalysis, allAnalyses) {
 
   refs.alternativesGrid.innerHTML = alternatives
     .map((entry) => {
-      const { analysis, aiCleanDelta } = entry;
-      const aiClean = analysis.aiCleanScore || analysis.cleanScore;
-      const badge = aiCleanDelta >= 1 ? `Cleaner +${aiCleanDelta}` : "Alternative";
+      const { analysis, cleanDelta } = entry;
+      const safeName = escapeHtml(analysis.product.name);
+      const safeImageUrl = safeUrl(analysis.product.imageUrl);
+      const cleanScore = analysis.cleanScore;
+      const badge = cleanDelta >= 1 ? `Cleaner +${cleanDelta}` : "Alternative";
       const reason = alternativeReason(selectedAnalysis, entry);
+      const imageMarkup = safeImageUrl !== "#"
+        ? `<img class="alt-image" src="${safeImageUrl}" alt="${safeName}" loading="lazy" />`
+        : `<div class="alt-image alt-image-placeholder" aria-hidden="true"></div>`;
       return `
       <article class="alt-card">
-        <h3>${escapeHtml(analysis.product.name)}</h3>
+        ${imageMarkup}
+        <h3>${safeName}</h3>
         <p>${escapeHtml(analysis.product.brand)}</p>
-        <span class="alt-badge">${badge} · AI Clean ${aiClean}</span>
+        <span class="alt-badge">${badge} · Clean ${cleanScore}</span>
         <p>${escapeHtml(reason)}</p>
         <p>${escapeHtml(buildOverview(analysis))}</p>
       </article>
@@ -901,7 +1089,7 @@ function renderMatches(analyses, selectedId = null) {
       <button type="button" class="match-card ${entry.product.id === selectedId ? "active" : ""}" data-midx="${index}">
         <p class="match-name">${escapeHtml(entry.product.name)}</p>
         <p class="match-brand">${escapeHtml(entry.product.brand)}</p>
-        <span class="match-score">AI Clean ${entry.aiCleanScore || entry.cleanScore}</span>
+        <span class="match-score">Clean ${entry.cleanScore}</span>
       </button>
     `
     )
@@ -961,6 +1149,10 @@ function renderEmptyState(message) {
   refs.matchesGrid.innerHTML = `<p class="empty-state">Your matching products will appear here after search.</p>`;
   refs.riskList.innerHTML = "";
   refs.goodList.innerHTML = "";
+  refs.lookForTitle.textContent = "What to Look for in Cleaner Options";
+  refs.lookForList.innerHTML = `<li>Search a product to get tailored cleaner guidance.</li>`;
+  refs.summaryTitle.textContent = "Summary: Selected vs Cleaner Options";
+  refs.summaryRows.innerHTML = "";
   refs.alternativesGrid.innerHTML =
     `<p class="empty-state">When a better option is found in the same search set, it will appear here.</p>`;
 }
@@ -1201,7 +1393,7 @@ async function analyzeQuery(query, preferredProductName = "") {
     }
 
     const analyses = uniqueAnalyses(products.map(analyzeProduct));
-    applyAiModel(analyses);
+    applyModelRanking(analyses);
 
     analyses.sort((a, b) => {
       const preferredBoostA = preferredProductName &&
@@ -1212,20 +1404,20 @@ async function analyzeQuery(query, preferredProductName = "") {
         b.product.name.toLowerCase().includes(preferredProductName.toLowerCase())
         ? 6
         : 0;
-      const aiCleanA = a.aiCleanScore || a.cleanScore;
-      const aiCleanB = b.aiCleanScore || b.cleanScore;
-      const aiHazardA = a.aiHazardIndex || a.hazardScore;
-      const aiHazardB = b.aiHazardIndex || b.hazardScore;
+      const modelCleanA = a.modelCleanScore || a.cleanScore;
+      const modelCleanB = b.modelCleanScore || b.cleanScore;
+      const modelRiskA = a.modelRiskIndex || a.hazardScore;
+      const modelRiskB = b.modelRiskIndex || b.hazardScore;
       const rankA =
         relevanceScore(a.product, query) * 1.05 +
-        aiCleanA * 0.58 -
-        aiHazardA * 0.045 +
+        modelCleanA * 0.58 -
+        modelRiskA * 0.045 +
         a.confidence * 0.12 +
         preferredBoostA;
       const rankB =
         relevanceScore(b.product, query) * 1.05 +
-        aiCleanB * 0.58 -
-        aiHazardB * 0.045 +
+        modelCleanB * 0.58 -
+        modelRiskB * 0.045 +
         b.confidence * 0.12 +
         preferredBoostB;
       return rankB - rankA;
@@ -1338,6 +1530,7 @@ function setupEvents() {
 }
 
 function init() {
+  renderEmptyState("Search to see product details, ingredient signals, and impact notes.");
   renderFunFact("quick");
   setupEvents();
   window.setInterval(() => {
