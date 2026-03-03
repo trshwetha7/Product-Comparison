@@ -1502,8 +1502,9 @@ async function analyzeQuery(query, preferredProductName = "") {
     const selected = analysisById.get(selectedId) || analyses[0];
     renderSelectedAnalysis(selected, analyses);
     renderFunFact(state.factType);
+    const modelEnabled = payload.modelInfo && payload.modelInfo.enabled;
     if (payload.statusText) {
-      setStatus(payload.statusText);
+      setStatus(modelEnabled ? `${payload.statusText} AutoML scoring active.` : payload.statusText);
     } else {
       setStatus(`Analyzed ${analyses.length} products.`);
     }

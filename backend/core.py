@@ -1,12 +1,21 @@
 import math
+import os
 import random
 import re
-from typing import Any, Dict, List, Set, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
+import joblib
+import numpy as np
+from sklearn.ensemble import ExtraTreesRegressor, GradientBoostingRegressor, RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import train_test_split
 
 API_BASE = "https://world.openbeautyfacts.org/cgi/search.pl"
 MAKEUP_API_BASE = "https://makeup-api.herokuapp.com/api/v1/products.json"
+MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
+MODEL_PATH = MODEL_DIR / "glowkind_automl.joblib"
 
 CATEGORY_KEYWORDS = {
     "all": [],
@@ -172,6 +181,26 @@ FUN_FACTS = {
         "Lower-irritant formulas can support long-term skin comfort for sensitive users.",
     ],
 }
+
+AUTOML_SEARCH_SEEDS = [
+    "rare beauty lipstick",
+    "burts bees lip balm",
+    "vaseline lip therapy",
+    "maybelline mascara",
+    "nyx eyeliner",
+    "loreal shampoo",
+    "pantene shampoo",
+    "dove body wash",
+    "eve nyc shampoo",
+    "supergoop sunscreen",
+    "cerave moisturizer",
+    "la roche posay cleanser",
+    "chanel perfume",
+    "dior fragrance",
+    "clean reserve perfume",
+]
+
+_MODEL_BUNDLE_CACHE: Optional[Dict[str, Any]] = None
 
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
@@ -622,7 +651,255 @@ def fetch_products(query: str, page_size: int = 40, pages: int = 2, category: st
     return unique_products([*open_beauty_products, *makeup_products])
 
 
-def analyze_product(product: Dict[str, Any]) -> Dict[str, Any]:
+def product_numeric_features(product: Dict[str, Any]) -> Dict[str, float]:
+    searchable = product.get("searchableIngredients", "")
+    ingredients_text = product.get("ingredientsText", "")
+    labels = " ".join(product.get("labels", [])).lower()
+    packaging = " ".join(product.get("packaging", [])).lower()
+    category_key = primary_category_key(product)
+    eco_grade = product.get("ecoGrade", "")
+    eco_grade_score = eco_grade_to_score(eco_grade) or 0
+
+    risk_penalty_sum = 0.0
+    endocrine_penalty_sum = 0.0
+    environment_penalty_sum = 0.0
+    irritant_penalty_sum = 0.0
+    risk_count = 0
+    hormone_hits = 0
+    environment_hits = 0
+    irritant_hits = 0
+
+    for risk in RISK_INGREDIENTS:
+      if ingredient_match(searchable, risk["key"]):
+          risk_count += 1
+          risk_penalty_sum += risk["penalty"]
+          if any(key in risk["key"] for key in ENDOCRINE_RISK_KEYS):
+              hormone_hits += 1
+              endocrine_penalty_sum += risk["penalty"]
+          if any(key in risk["key"] for key in ENVIRONMENT_RISK_KEYS):
+              environment_hits += 1
+              environment_penalty_sum += risk["penalty"]
+          if any(key in risk["key"] for key in HIGH_IRRITANT_KEYS):
+              irritant_hits += 1
+              irritant_penalty_sum += risk["penalty"]
+
+    positive_hits = sum(1 for ingredient in BENEFICIAL_INGREDIENTS if ingredient in searchable)
+    eco_label_hits = sum(1 for label in ECO_LABEL_SIGNALS if label in labels)
+    clean_tag_hits = sum(1 for hint in CLEAN_TAG_HINTS if hint in labels)
+
+    ingredient_tokens = token_set(ingredients_text)
+    ingredient_token_count = len(ingredient_tokens)
+    ingredient_text_length = len(ingredients_text)
+    packaging_token_count = len(token_set(packaging))
+
+    return {
+        "risk_count": float(risk_count),
+        "risk_penalty_sum": float(risk_penalty_sum),
+        "hormone_hits": float(hormone_hits),
+        "environment_hits": float(environment_hits),
+        "irritant_hits": float(irritant_hits),
+        "endocrine_penalty_sum": float(endocrine_penalty_sum),
+        "environment_penalty_sum": float(environment_penalty_sum),
+        "irritant_penalty_sum": float(irritant_penalty_sum),
+        "positive_hits": float(positive_hits),
+        "eco_label_hits": float(eco_label_hits),
+        "clean_tag_hits": float(clean_tag_hits),
+        "has_ingredients": 1.0 if ingredients_text else 0.0,
+        "ingredient_text_length": float(ingredient_text_length),
+        "ingredient_token_count": float(ingredient_token_count),
+        "has_eco_grade": 1.0 if eco_grade else 0.0,
+        "eco_grade_score": float(eco_grade_score),
+        "packaging_token_count": float(packaging_token_count),
+        "packaging_plastic": 1.0 if "plastic" in packaging else 0.0,
+        "packaging_glass": 1.0 if "glass" in packaging else 0.0,
+        "packaging_recycled": 1.0 if "recycled" in packaging else 0.0,
+        "packaging_refill": 1.0 if "refill" in packaging else 0.0,
+        "packaging_aluminum": 1.0 if "aluminum" in packaging else 0.0,
+        "source_makeup_api": 1.0 if product.get("source") == "makeup_api" else 0.0,
+        "source_open_beauty_facts": 1.0 if product.get("source") == "open_beauty_facts" else 0.0,
+        "category_fragrances": 1.0 if category_key == "fragrances" else 0.0,
+        "category_lip_care": 1.0 if category_key == "lip-care" else 0.0,
+        "category_skin_care": 1.0 if category_key == "skin-care" else 0.0,
+        "category_eye_makeup": 1.0 if category_key == "eye-makeup" else 0.0,
+    }
+
+
+def model_feature_names() -> List[str]:
+    return [
+        "risk_count",
+        "risk_penalty_sum",
+        "hormone_hits",
+        "environment_hits",
+        "irritant_hits",
+        "endocrine_penalty_sum",
+        "environment_penalty_sum",
+        "irritant_penalty_sum",
+        "positive_hits",
+        "eco_label_hits",
+        "clean_tag_hits",
+        "has_ingredients",
+        "ingredient_text_length",
+        "ingredient_token_count",
+        "has_eco_grade",
+        "eco_grade_score",
+        "packaging_token_count",
+        "packaging_plastic",
+        "packaging_glass",
+        "packaging_recycled",
+        "packaging_refill",
+        "packaging_aluminum",
+        "source_makeup_api",
+        "source_open_beauty_facts",
+        "category_fragrances",
+        "category_lip_care",
+        "category_skin_care",
+        "category_eye_makeup",
+    ]
+
+
+def product_feature_vector(product: Dict[str, Any], feature_names: Optional[List[str]] = None) -> np.ndarray:
+    features = product_numeric_features(product)
+    ordered_names = feature_names or model_feature_names()
+    return np.array([features.get(name, 0.0) for name in ordered_names], dtype=float)
+
+
+def build_training_corpus() -> List[Dict[str, Any]]:
+    products: List[Dict[str, Any]] = []
+    for query in AUTOML_SEARCH_SEEDS:
+        category = category_from_text(query)
+        products.extend(fetch_products(query, 36, 2, category))
+    return unique_products(products)
+
+
+def _candidate_regressors(random_state: int = 42) -> Dict[str, Any]:
+    return {
+        "random_forest": RandomForestRegressor(
+            n_estimators=240,
+            max_depth=12,
+            min_samples_leaf=2,
+            random_state=random_state,
+            n_jobs=-1,
+        ),
+        "extra_trees": ExtraTreesRegressor(
+            n_estimators=260,
+            max_depth=14,
+            min_samples_leaf=2,
+            random_state=random_state,
+            n_jobs=-1,
+        ),
+        "gradient_boosting": GradientBoostingRegressor(
+            n_estimators=220,
+            learning_rate=0.05,
+            max_depth=3,
+            random_state=random_state,
+        ),
+    }
+
+
+def train_automl_bundle(force_retrain: bool = False) -> Dict[str, Any]:
+    global _MODEL_BUNDLE_CACHE
+
+    if not force_retrain and _MODEL_BUNDLE_CACHE is not None:
+        return _MODEL_BUNDLE_CACHE
+    if not force_retrain and MODEL_PATH.exists():
+        _MODEL_BUNDLE_CACHE = joblib.load(MODEL_PATH)
+        return _MODEL_BUNDLE_CACHE
+
+    products = build_training_corpus()
+    if len(products) < 40:
+        raise RuntimeError("Not enough products available to train the AutoML model.")
+
+    labeled = [analyze_product(product, model_bundle=None) for product in products]
+    feature_names = model_feature_names()
+    X = np.vstack([product_feature_vector(analysis["product"], feature_names) for analysis in labeled])
+    targets = {
+        "bodyScore": np.array([analysis["bodyScore"] for analysis in labeled], dtype=float),
+        "ecoScore": np.array([analysis["ecoScore"] for analysis in labeled], dtype=float),
+        "cleanScore": np.array([analysis["cleanScore"] for analysis in labeled], dtype=float),
+        "hazardScore": np.array([analysis["hazardScore"] for analysis in labeled], dtype=float),
+    }
+
+    X_train, X_test, idx_train, idx_test = train_test_split(
+        X,
+        np.arange(len(labeled)),
+        test_size=0.22,
+        random_state=42,
+    )
+
+    models: Dict[str, Any] = {}
+    metrics: Dict[str, Any] = {}
+
+    for target_name, y_full in targets.items():
+        y_train = y_full[idx_train]
+        y_test = y_full[idx_test]
+        best_name = ""
+        best_model = None
+        best_mae = float("inf")
+        best_r2 = float("-inf")
+
+        for candidate_name, candidate in _candidate_regressors().items():
+            candidate.fit(X_train, y_train)
+            predictions = candidate.predict(X_test)
+            mae = mean_absolute_error(y_test, predictions)
+            r2 = r2_score(y_test, predictions) if len(set(y_test.tolist())) > 1 else 0.0
+            if mae < best_mae:
+                best_name = candidate_name
+                best_model = candidate
+                best_mae = float(mae)
+                best_r2 = float(r2)
+
+        assert best_model is not None
+        best_model.fit(X, y_full)
+        models[target_name] = best_model
+        metrics[target_name] = {
+            "bestModel": best_name,
+            "mae": round(best_mae, 4),
+            "r2": round(best_r2, 4),
+        }
+
+    bundle = {
+        "featureNames": feature_names,
+        "models": models,
+        "metrics": metrics,
+        "trainingSize": len(labeled),
+        "searchSeeds": AUTOML_SEARCH_SEEDS,
+        "version": 1,
+    }
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(bundle, MODEL_PATH)
+    _MODEL_BUNDLE_CACHE = bundle
+    return bundle
+
+
+def load_automl_bundle(auto_train: bool = False) -> Optional[Dict[str, Any]]:
+    global _MODEL_BUNDLE_CACHE
+
+    if _MODEL_BUNDLE_CACHE is not None:
+        return _MODEL_BUNDLE_CACHE
+    if MODEL_PATH.exists():
+        _MODEL_BUNDLE_CACHE = joblib.load(MODEL_PATH)
+        return _MODEL_BUNDLE_CACHE
+    if auto_train or os.getenv("GLOWKIND_AUTOTRAIN") == "1":
+        try:
+            return train_automl_bundle(force_retrain=False)
+        except Exception:
+            return None
+    return None
+
+
+def predict_scores_with_automl(product: Dict[str, Any], model_bundle: Dict[str, Any]) -> Dict[str, int]:
+    feature_names = model_bundle["featureNames"]
+    features = product_feature_vector(product, feature_names).reshape(1, -1)
+    models = model_bundle["models"]
+    return {
+        "bodyScore": int(clamp(round(float(models["bodyScore"].predict(features)[0])), 1, 99)),
+        "ecoScore": int(clamp(round(float(models["ecoScore"].predict(features)[0])), 1, 99)),
+        "cleanScore": int(clamp(round(float(models["cleanScore"].predict(features)[0])), 1, 99)),
+        "hazardScore": int(clamp(round(float(models["hazardScore"].predict(features)[0])), 0, 160)),
+    }
+
+
+def analyze_product(product: Dict[str, Any], model_bundle: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     body_score = 96.0
     eco_score = 92.0
     risks: List[Dict[str, Any]] = []
@@ -705,15 +982,15 @@ def analyze_product(product: Dict[str, Any]) -> Dict[str, Any]:
     eco_score -= environment_hits * 2.4
     body_score -= irritant_hits * 1.5
 
-    body_score = int(clamp(round(body_score), 1, 99))
-    eco_score = int(clamp(round(eco_score), 1, 99))
-    overall_score = int(round(body_score * 0.52 + eco_score * 0.48))
+    heuristic_body_score = int(clamp(round(body_score), 1, 99))
+    heuristic_eco_score = int(clamp(round(eco_score), 1, 99))
+    heuristic_overall_score = int(round(heuristic_body_score * 0.52 + heuristic_eco_score * 0.48))
 
-    clean_score = int(
+    heuristic_clean_score = int(
         clamp(
             round(
-                body_score * 0.56
-                + eco_score * 0.44
+                heuristic_body_score * 0.56
+                + heuristic_eco_score * 0.44
                 - hormone_hits * 5
                 - environment_hits * 2.8
                 - irritant_hits * 2.1
@@ -725,7 +1002,7 @@ def analyze_product(product: Dict[str, Any]) -> Dict[str, Any]:
         )
     )
 
-    hazard_score = int(
+    heuristic_hazard_score = int(
         clamp(
             round(
                 hormone_severity * 1.35
@@ -757,6 +1034,22 @@ def analyze_product(product: Dict[str, Any]) -> Dict[str, Any]:
     profile_tokens = token_set(f"{product.get('name', '')} {product.get('brand', '')} {product.get('categories', '')} {ingredients_text}")
     identity_tokens = token_set(f"{product.get('name', '')} {product.get('categories', '')}")
 
+    body_score = heuristic_body_score
+    eco_score = heuristic_eco_score
+    clean_score = heuristic_clean_score
+    hazard_score = heuristic_hazard_score
+
+    if model_bundle is not None:
+        ml_scores = predict_scores_with_automl(product, model_bundle)
+        # Keep ML predictions grounded near the heuristic baseline so rankings improve
+        # without producing unstable jumps from sparse product disclosures.
+        body_score = int(clamp(round(heuristic_body_score * 0.3 + ml_scores["bodyScore"] * 0.7), 1, 99))
+        eco_score = int(clamp(round(heuristic_eco_score * 0.25 + ml_scores["ecoScore"] * 0.75), 1, 99))
+        clean_score = int(clamp(round(heuristic_clean_score * 0.25 + ml_scores["cleanScore"] * 0.75), 1, 99))
+        hazard_score = int(clamp(round(heuristic_hazard_score * 0.35 + ml_scores["hazardScore"] * 0.65), 0, 160))
+
+    overall_score = int(round(body_score * 0.52 + eco_score * 0.48))
+
     return {
         "product": product,
         "risks": risks,
@@ -776,6 +1069,14 @@ def analyze_product(product: Dict[str, Any]) -> Dict[str, Any]:
         "overallScore": overall_score,
         "cleanScore": clean_score,
         "confidence": confidence,
+        "scoringMethod": "automl-blend" if model_bundle is not None else "heuristic",
+        "heuristicScores": {
+            "bodyScore": heuristic_body_score,
+            "ecoScore": heuristic_eco_score,
+            "overallScore": heuristic_overall_score,
+            "cleanScore": heuristic_clean_score,
+            "hazardScore": heuristic_hazard_score,
+        },
     }
 
 
@@ -976,6 +1277,8 @@ def serialize_analysis(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "overallScore": analysis["overallScore"],
         "cleanScore": analysis["cleanScore"],
         "confidence": analysis["confidence"],
+        "scoringMethod": analysis.get("scoringMethod", "heuristic"),
+        "heuristicScores": analysis.get("heuristicScores", {}),
         "modelSignals": analysis.get("modelSignals", {}),
         "modelCleanScore": analysis.get("modelCleanScore", analysis["cleanScore"]),
         "modelRiskIndex": analysis.get("modelRiskIndex", analysis["hazardScore"]),
@@ -1041,7 +1344,8 @@ def analyze_query(query: str, category: str = "all", preferred: str = "") -> Dic
             "statusText": "No matching beauty products found. Try another spelling or wider term.",
         }
 
-    analyses = unique_analyses([analyze_product(product) for product in products])
+    model_bundle = load_automl_bundle(auto_train=False)
+    analyses = unique_analyses([analyze_product(product, model_bundle=model_bundle) for product in products])
     apply_model_ranking(analyses)
 
     preferred_lower = (preferred or "").lower()
@@ -1076,6 +1380,11 @@ def analyze_query(query: str, category: str = "all", preferred: str = "") -> Dic
         "analyses": serialized_analyses,
         "selectedId": selected_id,
         "alternativesById": alternatives_by_id,
+        "modelInfo": {
+            "enabled": model_bundle is not None,
+            "trainingSize": model_bundle.get("trainingSize", 0) if model_bundle else 0,
+            "metrics": model_bundle.get("metrics", {}) if model_bundle else {},
+        },
         "statusText": f"Analyzed {len(analyses)} products ({obf_count} Open Beauty Facts + {makeup_count} Makeup API).",
     }
 
@@ -1095,3 +1404,23 @@ def next_fact(fact_type: str, previous: str = "") -> Dict[str, str]:
     filtered = [item for item in pool if item != previous]
     choice_pool = filtered or pool
     return {"fact": random.choice(choice_pool)}
+
+
+def model_status() -> Dict[str, Any]:
+    bundle = load_automl_bundle(auto_train=False)
+    return {
+        "available": bundle is not None,
+        "path": str(MODEL_PATH),
+        "trainingSize": bundle.get("trainingSize", 0) if bundle else 0,
+        "metrics": bundle.get("metrics", {}) if bundle else {},
+    }
+
+
+def train_model_endpoint(force: bool = False) -> Dict[str, Any]:
+    bundle = train_automl_bundle(force_retrain=force)
+    return {
+        "ok": True,
+        "path": str(MODEL_PATH),
+        "trainingSize": bundle.get("trainingSize", 0),
+        "metrics": bundle.get("metrics", {}),
+    }

@@ -1,72 +1,91 @@
 # GlowKind - Clean Beauty Finder
 
-GlowKind is a pastel-themed beauty sustainability app that helps you:
+GlowKind is a beauty sustainability app for searching products, estimating body and eco impact, and comparing safer alternatives.
 
-- Search products with typeahead suggestions
-- Filter by category (`Fragrances`, `Lip Care`, `Skin Care`, `Eye Makeup`)
-- Get estimated `Overall`, `Body Friendly`, and `Eco Friendly` scores
-- See ingredient watch-outs (including endocrine-disruptor risk signals)
-- Discover cleaner alternatives in the same category without adding extra risk flags
-- Read rotating sustainability snippets
-
-The app pulls live product data from [Open Beauty Facts](https://world.openbeautyfacts.org/) and Makeup API.
-
-## Tech Stack
+## Languages and Stack
 
 - HTML
 - CSS
-- Vanilla JavaScript (UI)
-- Python + FastAPI (scoring and ranking API)
+- JavaScript
+- Python
+- FastAPI
+- scikit-learn
 - Open Beauty Facts API
 - Makeup API
 
-## Scoring Method
+## What The Backend Does
 
-- `Body Friendly`: baseline minus endocrine/irritant/formulation penalties plus beneficial ingredient boosts.
-- `Eco Friendly`: ingredient + packaging + eco-label signals (with ecoscore when available).
-- `Clean Score`: weighted blend of body and eco scores with extra penalties for risk flags.
-- `Risk Index`: severity aggregate from risk families and penalties.
-- `Model Ranking`: percentile-normalized weighted model used for product ordering and alternative ranking.
+The backend is not just serving static data.
+It now does three separate things in Python:
 
-## Alternative Rules
+1. Fetches product data from public beauty data sources.
+2. Extracts structured product features such as ingredient risk counts, endocrine-risk markers, eco-risk markers, packaging signals, ingredient completeness, and beneficial ingredient density.
+3. Uses a scikit-learn AutoML-style training step to select the best regressors for:
+   - `Body Friendly`
+   - `Eco Friendly`
+   - `Clean Score`
+   - `Risk Index`
 
-- Alternatives are scoped to the same product category.
-- Alternatives are filtered so they do not introduce additional risk flags compared to the selected product.
-- If no safer/equal match exists in current data, no cleaner alternative is shown.
+## Model Approach
 
-## Run Locally
+This is a practical AutoML-style backend, not deep learning.
 
-Use two terminals.
+- Candidate models are trained in Python with `scikit-learn`.
+- The training script compares multiple regressors and keeps the best-performing model per target.
+- The final API uses the trained model artifact if available.
+- If no trained artifact exists yet, the backend falls back to the deterministic heuristic scorer.
 
-Terminal 1 (backend):
+## Alternative Selection Rules
+
+- Alternatives stay within the same product category.
+- Alternatives are filtered so they do not add extra risk flags versus the selected product.
+- If no safer/equal product is found in current data, no cleaner alternative is forced.
+
+## Local Run
+
+Run these in `/Users/trshwetha7/Desktop/Clean beauty products`.
+
+Terminal 1: create venv and install deps
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+Terminal 1: train the model
+
+```bash
+python scripts/train_model.py
+```
+
+Terminal 1: start FastAPI backend
+
+```bash
 uvicorn backend.server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Terminal 2 (frontend):
+Terminal 2: start frontend
 
 ```bash
 python3 -m http.server 5173
 ```
 
-Open: [http://localhost:5173](http://localhost:5173)
+Open:
 
-## Deploy to Vercel
+- `http://localhost:5173`
 
-1. Push to GitHub.
-2. Import repo in Vercel.
-3. Framework: `Other`.
-4. Build command: empty.
-5. Output directory: empty (root).
-6. Deploy.
+## Useful Local API Checks
 
-Vercel serves static files and Python functions under `api/`.
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/api/model-status
+curl "http://127.0.0.1:8000/api/suggest?query=rare%20beauty"
+curl "http://127.0.0.1:8000/api/analyze?query=burts%20bees%20lip%20balm&category=lip-care"
+```
 
 ## Notes
 
-- Scores are data-driven heuristics from public data, not medical advice.
-- Incomplete ingredient disclosures reduce confidence.
+- This is a data-driven scoring system, not medical advice.
+- The model quality depends on publicly available ingredient and packaging data.
+- If you want true trained labels from expert-reviewed safety data, that would be the next upgrade.
