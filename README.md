@@ -16,7 +16,10 @@ It allows a user to search for beauty products, review ingredient and packaging 
 
 ### Cleaner alternatives comparison
 
-![GlowKind cleaner alternatives view 1](assets/screenshots/3.png) ![GlowKind cleaner alternatives view 2](assets/screenshots/4.png)
+<p align="center">
+  <img src="assets/screenshots/3.png" alt="GlowKind cleaner alternatives view 1" width="48%" />
+  <img src="assets/screenshots/4.png" alt="GlowKind cleaner alternatives view 2" width="48%" />
+</p>
 
 ## What GlowKind Does
 
