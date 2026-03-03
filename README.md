@@ -18,7 +18,7 @@ It allows a user to search for beauty products, review ingredient and packaging 
 
 <p align="center">
   <img src="assets/screenshots/3.png" alt="GlowKind cleaner alternatives view 1" width="48%" />
-  <img src="assets/screenshots/4.png" alt="GlowKind cleaner alternatives view 2" width="48%" />
+  <img src="assets/screenshots/4.png" alt="GlowKind cleaner alternatives view 2" width="50%" />
 </p>
 
 ## What GlowKind Does
