@@ -21,12 +21,16 @@ The app is built for beauty categories such as:
 
 Beauty shopping is often driven by branding, trends, and marketing claims, but product safety and sustainability are usually harder to evaluate quickly.
 
-GlowKind helps by turning scattered product information into a clearer decision system:
+GlowKind helps by turning scattered product information into a clearer decision system. The idea came from my own experience of doing this the hard way for a long time. For the past year and a half, I have been the kind of person who reads labels, cross-checks ingredients, and compares products across multiple sources before I buy anything. I have also been experimenting with different large language models and tools like ChatGPT and Gemini to speed up that research, but I still found myself doing the same repetitive work every single time, and I realized how inaccessible this process is for most people.
 
-- It highlights ingredient watch-outs
-- It estimates product risk and sustainability signals
-- It surfaces cleaner alternatives in the same category
-- It gives users a more intuitive way to compare products beyond marketing language
+That is exactly what GlowKind is built to solve:
+
+- It highlights ingredient watch-outs in plain language.
+- It estimates product risk and sustainability signals using consistent criteria.
+- It surfaces cleaner alternatives within the same category, not just generic “clean” suggestions.
+- It gives users an intuitive way to compare products beyond marketing language, so they can make decisions faster and with more confidence.
+
+GlowKind is essentially the system I wished existed while I was doing all that research manually. I wanted to take something that started as my personal process and turn it into something bigger and genuinely useful for anyone who cares about health, hormones, and the environment, but does not have the time to do deep research for every purchase.
 
 ## Core Scoring System
 
@@ -140,4 +144,4 @@ This repository includes:
 
 ## Author
 
-Created by **Shwetha TR**
+Created by **Shwetha Tinnium Raju**
