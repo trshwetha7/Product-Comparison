@@ -4,6 +4,22 @@ GlowKind is an AI-assisted beauty product discovery and sustainability platform 
 
 It allows a user to search for beauty products, review ingredient and packaging signals, understand how body-friendly and eco-friendly a product may be, and compare it against safer alternatives in the same category.
 
+## Product Preview
+
+### Search, product summary, and score view
+
+![GlowKind search and scoring view](assets/screenshots/1.png)
+
+### Matched products and product browsing
+
+![GlowKind matched products view](assets/screenshots/2.png)
+
+### Cleaner alternatives comparison
+
+![GlowKind cleaner alternatives view 1](assets/screenshots/3.png)
+
+![GlowKind cleaner alternatives view 2](assets/screenshots/4.png)
+
 ## What GlowKind Does
 
 GlowKind is designed to answer a practical question:
